@@ -20,6 +20,43 @@ from ..utils import now_local
 from . import audit
 from .schedule import list_day, list_range
 from .schedule_sync import latest_snapshot
+from datetime import date, time
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..models import LessonOccurrence, Document
+
+def is_lesson_excused_by_document(occurrence: "LessonOccurrence", document: "Document") -> bool:
+    """
+    Проверяет, попадает ли конкретная пара в период действия документа 
+    с учетом времени начала и окончания.
+    """
+    occ_date = occurrence.date
+    doc_start = document.valid_from or document.issued_at
+    doc_end = document.valid_to or doc_start
+
+    if not doc_start or not doc_end:
+        return False
+
+    # 1. Базовая проверка: дата пары должна быть в диапазоне дат документа
+    if not (doc_start <= occ_date <= doc_end):
+        return False
+
+    # Получаем время пары из связанного шаблона (Lesson)
+    occ_start_time = occurrence.lesson.start_time
+    occ_end_time = occurrence.lesson.end_time
+
+    # 2. Проверка времени начала: если пара в день начала действия документа
+    if occ_date == doc_start and document.valid_from_time is not None:
+        if occ_start_time < document.valid_from_time:
+            return False  # Пара началась раньше, чем действует документ
+
+    # 3. Проверка времени окончания: если пара в день окончания действия документа
+    if occ_date == doc_end and document.valid_to_time is not None:
+        if occ_end_time > document.valid_to_time:
+            return False  # Пара закончилась позже, чем действует документ
+
+    return True
 
 # «Опоздал» и «не ответил» больше не используются в интерфейсе: по умолчанию
 # студент считается присутствующим, отмечают только отсутствующих.
