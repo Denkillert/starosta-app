@@ -20,51 +20,13 @@ from ..utils import now_local
 from . import audit
 from .schedule import list_day, list_range
 from .schedule_sync import latest_snapshot
-from datetime import date, time
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from ..models import LessonOccurrence, Document
-
-def is_lesson_excused_by_document(occurrence: "LessonOccurrence", document: "Document") -> bool:
-    """
-    Проверяет, попадает ли конкретная пара в период действия документа 
-    с учетом времени начала и окончания.
-    """
-    occ_date = occurrence.date
-    doc_start = document.valid_from or document.issued_at
-    doc_end = document.valid_to or doc_start
-
-    if not doc_start or not doc_end:
-        return False
-
-    # 1. Базовая проверка: дата пары должна быть в диапазоне дат документа
-    if not (doc_start <= occ_date <= doc_end):
-        return False
-
-    # Получаем время пары из связанного шаблона (Lesson)
-    occ_start_time = occurrence.lesson.start_time
-    occ_end_time = occurrence.lesson.end_time
-
-    # 2. Проверка времени начала: если пара в день начала действия документа
-    if occ_date == doc_start and document.valid_from_time is not None:
-        if occ_start_time < document.valid_from_time:
-            return False  # Пара началась раньше, чем действует документ
-
-    # 3. Проверка времени окончания: если пара в день окончания действия документа
-    if occ_date == doc_end and document.valid_to_time is not None:
-        if occ_end_time > document.valid_to_time:
-            return False  # Пара закончилась позже, чем действует документ
-
-    return True
-
-# «Опоздал» и «не ответил» больше не используются в интерфейсе: по умолчанию
-# студент считается присутствующим, отмечают только отсутствующих.
 VISIBLE = (
     AttendanceStatus.PRESENT,
     AttendanceStatus.ABSENT,
     AttendanceStatus.EXCUSED,
 )
+
 HOURS_PER_LESSON = max(1, settings.academic_hours_per_lesson)
 
 STATUS_SYMBOL = {
@@ -73,15 +35,12 @@ STATUS_SYMBOL = {
     AttendanceStatus.EXCUSED: "У",
 }
 
-
 def effective_status(row: Attendance | None) -> str:
-    """Статус для отображения: нет отметки = присутствовал."""
     if row is None:
         return AttendanceStatus.PRESENT
     if row.status in (AttendanceStatus.LATE, AttendanceStatus.NOT_ANSWERED):
         return AttendanceStatus.PRESENT
     return row.status
-
 
 @dataclass(slots=True)
 class OccurrenceView:
@@ -119,7 +78,6 @@ class OccurrenceView:
     def symbol_for(self, member_id: int) -> str:
         return STATUS_SYMBOL.get(self.status_for(member_id), "")
 
-
 @dataclass(slots=True)
 class StudentStats:
     member: Membership
@@ -145,7 +103,6 @@ class StudentStats:
             return None
         return round(self.attended * 100 / base)
 
-
 @dataclass(slots=True)
 class MonthStudent:
     member: Membership
@@ -153,7 +110,6 @@ class MonthStudent:
     total_hours: int = 0
     excused_hours: int = 0
     absent_hours: int = 0
-
 
 @dataclass(slots=True)
 class PaidEntry:
@@ -163,7 +119,6 @@ class PaidEntry:
     teacher: str
     kind: str
     hours: int
-
 
 @dataclass(slots=True)
 class MonthData:
@@ -180,7 +135,6 @@ class MonthData:
             "absent": sum(s.absent_hours for s in self.students),
             "students": len(self.students),
         }
-
 
 def roster(db: Session, group_id: int) -> list[Membership]:
     role_order = case(
@@ -199,14 +153,12 @@ def roster(db: Session, group_id: int) -> list[Membership]:
         ).all()
     )
 
-
 def day_overview(
     db: Session, group_id: int, day: date, terms: int | None = None
 ) -> list[OccurrenceView]:
     members = roster(db, group_id)
     member_ids = [m.id for m in members]
     views: list[OccurrenceView] = []
-
     for occurrence in list_day(db, group_id, day):
         if occurrence.status == OccurrenceStatus.CANCELLED:
             continue
@@ -235,7 +187,6 @@ def day_overview(
         view.counts = counts
         views.append(view)
     return views
-
 
 def mark(
     db: Session,
@@ -266,7 +217,6 @@ def mark(
         row = Attendance(occurrence_id=occurrence.id, member_id=member.id)
         db.add(row)
 
-    # Ручная отметка снимает автоматическую «уважительную» по документу.
     if status in (AttendanceStatus.PRESENT, AttendanceStatus.ABSENT):
         row.document_id = None
         row.previous_status = None
@@ -292,7 +242,6 @@ def mark(
         db.commit()
     return row
 
-
 def toggle(
     db: Session,
     *,
@@ -300,7 +249,6 @@ def toggle(
     member: Membership,
     actor: User | None = None,
 ) -> str:
-    """Переключает «был / не был». «У» снимается ручной отметкой."""
     row = db.scalar(
         select(Attendance).where(
             Attendance.occurrence_id == occurrence.id,
@@ -323,11 +271,9 @@ def toggle(
     )
     return target
 
-
 def reset_day(
     db: Session, group_id: int, day: date, actor: User | None = None
 ) -> int:
-    """Снимает ручные отметки за день. Уважительные по документам остаются."""
     occurrence_ids = [
         o.id
         for o in list_day(db, group_id, day)
@@ -335,6 +281,7 @@ def reset_day(
     ]
     if not occurrence_ids:
         return 0
+
     rows = db.scalars(
         select(Attendance).where(
             Attendance.occurrence_id.in_(occurrence_ids),
@@ -354,7 +301,6 @@ def reset_day(
     )
     db.commit()
     return len(rows)
-
 
 def summary(
     db: Session, group_id: int, date_from: date, date_to: date
@@ -395,10 +341,9 @@ def summary(
         item.absent = counts.get(AttendanceStatus.ABSENT, 0)
         item.excused = counts.get(AttendanceStatus.EXCUSED, 0)
         item.total = total_occurrences
-        # Всё, что не отмечено отсутствующим/уважительным, считается присутствием.
         item.present = max(0, total_occurrences - item.absent - item.excused)
-    return list(stats.values())
 
+    return list(stats.values())
 
 def totals(stats: list[StudentStats]) -> dict[str, int]:
     result = {
@@ -421,7 +366,6 @@ def totals(stats: list[StudentStats]) -> dict[str, int]:
     base = result["attended"] + result["absent"]
     result["percent"] = round(result["attended"] * 100 / base) if base else 0
     return result
-
 
 def subject_summary(
     db: Session, group_id: int, date_from: date, date_to: date
@@ -502,7 +446,6 @@ def subject_summary(
     result.sort(key=lambda item: item["name"])
     return result
 
-
 def _document_students(doc) -> list[Membership]:
     students = list(getattr(doc, "students", []) or [])
     if students:
@@ -511,8 +454,8 @@ def _document_students(doc) -> list[Membership]:
         return [doc.student]
     return []
 
-
 def _document_window(doc) -> tuple[datetime, datetime] | None:
+    """Возвращает точный временной интервал действия документа."""
     if not doc.valid_from:
         return None
     start_day = doc.valid_from
@@ -521,18 +464,18 @@ def _document_window(doc) -> tuple[datetime, datetime] | None:
     end = datetime.combine(end_day, doc.valid_to_time or time.max)
     return start, end
 
-
 def apply_document(db: Session, doc) -> int:
-    """Ставит «уважительную» на пары студента(ов) в период действия документа."""
     if doc.type not in (DocType.ORDER, DocType.CERTIFICATE):
         return 0
     if doc.status not in (DocStatus.ACTIVE, DocStatus.APPROVED):
         return 0
+
     students = _document_students(doc)
     window = _document_window(doc)
     if not students or window is None:
         doc.meta = {**(doc.meta or {}), "excused_lessons": 0}
         return 0
+
     start, end = window
     if start > end:
         return 0
@@ -545,10 +488,12 @@ def apply_document(db: Session, doc) -> int:
     )
     if doc.lesson_ids:
         stmt = stmt.where(LessonOccurrence.lesson_id.in_(doc.lesson_ids))
+
     occurrences = []
     for occurrence in db.scalars(stmt).all():
         occ_start = datetime.combine(occurrence.date, occurrence.lesson.start_time)
         occ_end = datetime.combine(occurrence.date, occurrence.lesson.end_time)
+        # Ключевая проверка: пересекается ли время пары с временем действия документа
         if occ_start < end and occ_end > start:
             occurrences.append(occurrence)
 
@@ -571,6 +516,7 @@ def apply_document(db: Session, doc) -> int:
     comment = f"{label} №{doc.number}" if doc.number else label
     changed = 0
     total = 0
+
     for student_id in student_ids:
         for occurrence in occurrences:
             row = existing.get((student_id, occurrence.id))
@@ -586,27 +532,24 @@ def apply_document(db: Session, doc) -> int:
                 None,
                 doc.id,
             ):
-                # Уже освобождён другим документом — не перезаписываем.
                 continue
             elif row.status == AttendanceStatus.PRESENT:
-                # Студент был на паре — документ не должен это скрывать.
                 continue
             else:
                 if row.status != AttendanceStatus.EXCUSED:
                     row.previous_status = row.status or AttendanceStatus.ABSENT
                 if row.status != AttendanceStatus.EXCUSED or row.document_id != doc.id:
                     changed += 1
-            row.status = AttendanceStatus.EXCUSED
-            row.comment = comment
-            row.source = "document"
-            row.document_id = doc.id
-            row.marked_at = now_local()
+                row.status = AttendanceStatus.EXCUSED
+                row.comment = comment
+                row.source = "document"
+                row.document_id = doc.id
+                row.marked_at = now_local()
             total += 1
 
     db.flush()
     doc.meta = {**(doc.meta or {}), "excused_lessons": total}
     return changed
-
 
 def revert_document(db: Session, doc) -> int:
     rows = db.scalars(
@@ -621,8 +564,6 @@ def revert_document(db: Session, doc) -> int:
         ):
             row.status = AttendanceStatus.PRESENT
         else:
-            # Освобождение подразумевало пропуск: без документа он становится
-            # неуважительным, а не «присутствием».
             row.status = AttendanceStatus.ABSENT
         row.previous_status = None
         row.document_id = None
@@ -633,7 +574,6 @@ def revert_document(db: Session, doc) -> int:
     doc.meta = {**(doc.meta or {}), "excused_lessons": 0}
     return changed
 
-
 def month_matrix(
     db: Session, group_id: int, year: int, month: int
 ) -> MonthData:
@@ -641,17 +581,17 @@ def month_matrix(
     next_month = date(year + (month == 12), month % 12 + 1, 1)
     last = next_month - timedelta(days=1)
     data = MonthData(year=year, month=month)
-
     members = roster(db, group_id)
     if not members:
         return data
-    member_by_id = {member.id: member for member in members}
 
+    member_by_id = {member.id: member for member in members}
     occurrences = [
         occurrence
         for occurrence in list_range(db, group_id, first, last)
         if occurrence.status == OccurrenceStatus.SCHEDULED
     ]
+
     if not occurrences:
         data.students = [MonthStudent(member=member) for member in members]
         return data
@@ -662,6 +602,7 @@ def month_matrix(
             Attendance.member_id.in_(list(member_by_id)),
         )
     ).all()
+
     statuses = {
         (row.member_id, row.occurrence_id): effective_status(row) for row in rows
     }
@@ -673,6 +614,7 @@ def month_matrix(
             status = statuses.get((member.id, occurrence.id), AttendanceStatus.PRESENT)
             if status not in (AttendanceStatus.ABSENT, AttendanceStatus.EXCUSED):
                 continue
+
             item = students[member.id]
             item.days[occurrence.date.day] = (
                 item.days.get(occurrence.date.day, 0) + hours
@@ -695,7 +637,6 @@ def month_matrix(
 
     data.students = [students[member.id] for member in members]
     return data
-
 
 def last_sync_info(db: Session, group_id: int, term: int) -> dict | None:
     snapshot = latest_snapshot(db, group_id, term)

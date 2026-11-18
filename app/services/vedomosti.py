@@ -364,7 +364,6 @@ def _merged_header(table, row: int, start: int, end: int, text: str) -> None:
 
 
 def _documents_table(document, report: PropuskiReport) -> None:
-    """Справки, заявления и распоряжения — как в ведомости деканата."""
     _paragraph(
         document,
         "Справки, заявления и распоряжения",
@@ -411,7 +410,6 @@ def _documents_table(document, report: PropuskiReport) -> None:
 
 
 def _paid_work_table(document, report: PropuskiReport) -> None:
-    """Нижняя таблица отработки в точности как в шаблоне."""
     course_str = str(report.course) if report.course else "_______"
     _paragraph(
         document,

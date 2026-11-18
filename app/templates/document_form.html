@@ -1,5 +1,7 @@
 {% extends "base.html" %}
+
 {% block title %}{{ type_|doc_label }}{% endblock %}
+
 {% block content %}
 <section class="page-head">
   <div>
@@ -63,7 +65,6 @@
         <input type="date" name="valid_to" value="{{ today|iso }}" required>
       </label>
     </div>
-
     <div class="form-row">
       <label class="field">
         <span>Время с <span class="muted small">(необязательно)</span></span>
@@ -74,7 +75,6 @@
         <input type="time" name="valid_to_time" aria-label="Время окончания">
       </label>
     </div>
-
     <p class="muted small">
       Если время не заполнено, документ действует весь день. «У» ставится только
       на пары, которые пересекаются с этим периодом.

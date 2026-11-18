@@ -1,34 +1,39 @@
 @echo off
-chcp 65001 >nul
-cd /d %~dp0
+rem ============================================================
+rem  Запуск проекта "Староста"
+rem  ВАЖНО: этот файл должен быть сохранён в кодировке CP866
+rem  (Cyrillic DOS). НЕ сохраняйте его в UTF-8 и НЕ добавляйте
+rem  chcp 65001 - это ломает разбор файла cmd.exe.
+rem ============================================================
+cd /d "%~dp0"
 
 echo ========================================
-echo   ╨Ч╨░╨┐╤Г╤Б╨║ ╨┐╤А╨╛╨╡╨║╤В╨░ "╨б╤В╨░╤А╨╛╤Б╤В╨░"
+echo   Запуск проекта "Староста"
 echo ========================================
 echo.
 
 if not exist ".venv\Scripts\python.exe" (
-    echo ╨Ю╨и╨Ш╨С╨Ъ╨Р: ╨▓╨╕╤А╤В╤Г╨░╨╗╤М╨╜╨╛╨╡ ╨╛╨║╤А╤Г╨╢╨╡╨╜╨╕╨╡ .venv ╨╜╨╡ ╨╜╨░╨╣╨┤╨╡╨╜╨╛.
-    echo ╨б╨╜╨░╤З╨░╨╗╨░ ╤Б╨╛╨╖╨┤╨░╨╣╤В╨╡ ╨╡╨│╨╛: python -m venv .venv
-    echo ╨Р ╨╖╨░╤В╨╡╨╝ ╤Г╤Б╤В╨░╨╜╨╛╨▓╨╕╤В╨╡ ╨╖╨░╨▓╨╕╤Б╨╕╨╝╨╛╤Б╤В╨╕: .venv\Scripts\pip install -r requirements.txt
+    echo ОШИБКА: виртуальное окружение .venv не найдено.
+    echo Сначала создайте его: python -m venv .venv
+    echo А затем установите зависимости: .venv\Scripts\pip install -r requirements.txt
     pause
     exit /b 1
 )
 
-echo [1/2] ╨Ч╨░╨┐╤Г╤Б╨║ ╨▓╨╡╨▒-╤Б╨╡╤А╨▓╨╡╤А╨░...
-start "StarostaWeb" /b cmd /c ".venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+echo [1/2] Запуск веб-сервера...
+start "Starosta Web" cmd /k ".venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
 timeout /t 4 /nobreak >nul
 
-echo [2/2] ╨Ч╨░╨┐╤Г╤Б╨║ ╨▒╨╛╤В╨░...
-start "StarostaBot" /b cmd /c ".venv\Scripts\python.exe -m bot.main"
+echo [2/2] Запуск бота...
+start "Starosta Bot" cmd /k ".venv\Scripts\python.exe -m bot.main"
 
 echo.
-echo ╨У╨╛╤В╨╛╨▓╨╛. ╨Я╤А╨╕╨╗╨╛╨╢╨╡╨╜╨╕╨╡ ╨┤╨╛╤Б╤В╤Г╨┐╨╜╨╛:
-echo   http://192.168.0.109:8000  (╤Б ╤В╨╡╨╗╨╡╤Д╨╛╨╜╨░ ╨▓ ╤В╨╛╨╣ ╨╢╨╡ Wi-Fi)
-echo   http://127.0.0.1:8000        (╤Б ╤Н╤В╨╛╨│╨╛ ╨║╨╛╨╝╨┐╤М╤О╤В╨╡╤А╨░)
+echo Готово. Открылись два окна:
+echo   "Starosta Web" - приложение, http://127.0.0.1:8000
+echo                    (там же печатается IP для телефона)
+echo   "Starosta Bot" - Telegram-бот
 echo.
-echo ╨Ъ╨╜╨╛╨┐╨║╨░ "╨Ю╤В╨║╤А╤Л╤В╤М ╨▓ ╨▒╤А╨░╤Г╨╖╨╡╤А╨╡" ╨▓ ╨▒╨╛╤В╨╡ ╨╛╤В╨║╤А╨╛╨╡╤В ╨┐╤А╨╕╨╗╨╛╨╢╨╡╨╜╨╕╨╡ ╨╜╨░ ╤В╨╡╨╗╨╡╤Д╨╛╨╜╨╡.
-echo ╨Ф╨╗╤П ╨╛╤Б╤В╨░╨╜╨╛╨▓╨║╨╕ ╨╖╨░╨║╤А╨╛╨╣╤В╨╡ ╨╛╨▒╨░ ╨║╨╛╨╜╤Б╨╛╨╗╤М╨╜╤Л╤Е ╨╛╨║╨╜╨░.
+echo Для остановки закройте оба окна "Starosta".
 echo.
 pause
