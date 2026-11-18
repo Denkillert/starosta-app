@@ -1,0 +1,171 @@
+{% extends "base.html" %}
+{% block title %}Главная{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Сегодня</h1>
+    <p class="muted">{{ today|date_ru(with_weekday=True) }}{% if week %} · неделя {{ week.number }}{% endif %}</p>
+  </div>
+  <a class="btn btn-primary btn-sm" href="{{ url_with('/journal', group=ctx.group.id, date=today|iso) }}">Отметить</a>
+</section>
+
+{% if not last_sync %}
+  <section class="card callout">
+    <h2 class="card-title">Расписание ещё не загружено</h2>
+    <p class="muted">Импортируйте расписание группы {{ ctx.group.code }} с сайта ПолесГУ. Это один запрос, дальше данные лежат в базе.</p>
+    {% if ctx.is_staff %}
+      <form method="post" action="/actions/sync" class="inline-form">
+        <input type="hidden" name="group" value="{{ ctx.group.id }}">
+        <input type="hidden" name="next" value="{{ url_with('/', group=ctx.group.id) }}">
+        <input type="hidden" name="term" value="{{ term }}">
+        <button class="btn btn-primary" type="submit">Загрузить расписание</button>
+      </form>
+    {% else %}
+      <p class="small muted">Попросите старосту загрузить расписание.</p>
+    {% endif %}
+  </section>
+{% else %}
+  <section class="hero card">
+    {% if upcoming %}
+      {% set next = upcoming[0] %}
+      <span class="hero-kicker">Ближайшая пара</span>
+      <div class="hero-title">{{ next.lesson.subject.name }}</div>
+      <div class="hero-meta">
+        {{ next.lesson.start_time|hm }}–{{ next.lesson.end_time|hm }}
+        {% if next.lesson.room %} · ауд. {{ next.lesson.room }}{% endif %}
+        {% if next.lesson.subgroup %} · {{ next.lesson.subgroup }}{% endif %}
+      </div>
+      {% if next.lesson.teacher %}<div class="hero-teacher">{{ next.lesson.teacher }}</div>{% endif %}
+    {% else %}
+      <span class="hero-kicker">На сегодня</span>
+      <div class="hero-title">Пар больше нет</div>
+      <div class="hero-meta">
+        Завтра {{ tomorrow|date_ru }}{% if tomorrow_lessons %} · пар: {{ tomorrow_lessons|length }}{% else %} · пар нет{% endif %}
+      </div>
+    {% endif %}
+  </section>
+{% endif %}
+
+<section class="stat-grid">
+  <div class="stat card">
+    <div class="stat-value">{{ members_count }}</div>
+    <div class="stat-label">студентов</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value {{ totals.percent|percent_class }}">{{ totals.percent }}%</div>
+    <div class="stat-label">посещаемость за месяц</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value {{ 'bad' if totals.absent else '' }}">{{ totals.absent }}</div>
+    <div class="stat-label">пропусков</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value {{ 'warn' if pending_statements else '' }}">{{ pending_statements|length }}</div>
+    <div class="stat-label">заявлений ждут</div>
+  </div>
+</section>
+
+<section class="quick-grid">
+  <a class="quick card" href="{{ url_with('/journal', group=ctx.group.id, date=today|iso) }}">
+    <span class="quick-icon">✓</span><span>Журнал</span>
+  </a>
+  <a class="quick card" href="{{ url_with('/students', group=ctx.group.id) }}">
+    <span class="quick-icon">☺</span><span>Студенты</span>
+  </a>
+  {% if ctx.is_staff %}
+    <a class="quick card" href="{{ url_with('/documents/new', group=ctx.group.id, type='order') }}">
+      <span class="quick-icon">✍</span><span>Распоряжение</span>
+    </a>
+    <a class="quick card" href="{{ url_with('/documents/new', group=ctx.group.id, type='certificate') }}">
+      <span class="quick-icon">▤</span><span>Справка</span>
+    </a>
+    <a class="quick card" href="{{ url_with('/documents/new', group=ctx.group.id, type='statement') }}">
+      <span class="quick-icon">✉</span><span>Заявление</span>
+    </a>
+  {% endif %}
+  <a class="quick card" href="{{ url_with('/stats', group=ctx.group.id) }}">
+    <span class="quick-icon">▥</span><span>Статистика</span>
+  </a>
+  <a class="quick card" href="{{ url_with('/help', group=ctx.group.id) }}">
+    <span class="quick-icon">?</span><span>Помощь</span>
+  </a>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">Пары сегодня</h2>
+    <span class="muted small">{{ views|length }}</span>
+  </div>
+  {% if views %}
+    <div class="lesson-list">
+      {% for view in views %}
+        <a class="lesson {{ 'is-cancelled' if view.occurrence.status == 'cancelled' }}"
+           href="{{ url_with('/journal', group=ctx.group.id, date=today|iso) }}">
+          <div class="lesson-time">{{ view.lesson.start_time|hm }}<span>{{ view.lesson.end_time|hm }}</span></div>
+          <div class="lesson-main">
+            <div class="lesson-subject">{{ view.lesson.subject.name }}</div>
+            <div class="lesson-meta">
+              {% if view.lesson.kind %}<span class="badge">{{ view.lesson.kind }}</span>{% endif %}
+              {% if view.lesson.room %}ауд. {{ view.lesson.room }}{% endif %}
+              {% if view.lesson.subgroup %} · {{ view.lesson.subgroup }}{% endif %}
+            </div>
+            {% if view.occurrence.status == 'cancelled' %}
+              <div class="small bad">Отменена{% if view.occurrence.note %}: {{ view.occurrence.note }}{% endif %}</div>
+            {% elif view.lesson.teacher %}
+              <div class="lesson-teacher">{{ view.lesson.teacher }}</div>
+            {% endif %}
+          </div>
+          <div class="lesson-side">
+            {% if ctx.is_staff %}
+              <span class="chip {{ 'ok' if view.marked == view.total and view.total else 'muted' }}">{{ view.marked }}/{{ view.total }}</span>
+            {% endif %}
+          </div>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty">
+      Сегодня пар нет{% if tomorrow_lessons %} · завтра {{ tomorrow_lessons|length }}{% endif %}
+    </div>
+  {% endif %}
+</section>
+
+{% if pending_statements %}
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Заявления ждут решения</h2>
+      <a class="link small" href="{{ url_with('/documents', group=ctx.group.id, type='statement', status='pending') }}">Все</a>
+    </div>
+    <div class="list">
+      {% for doc in pending_statements %}
+        <a class="list-item" href="{{ url_with('/documents/' ~ doc.id, group=ctx.group.id) }}">
+          <div>
+            <div class="list-title">{{ doc.title }}</div>
+            <div class="muted small">{{ doc.student.full_name if doc.student else '—' }} · {{ doc.issued_at|date_short }}</div>
+          </div>
+          <span class="badge warn">На рассмотрении</span>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}
+
+<div class="sync-row">
+  {% if last_sync %}
+    <span class="muted small">
+      Расписание вуза от {{ last_sync.updated or '—' }}
+      · проверено {{ last_sync.fetched_at.strftime('%d.%m %H:%M') }}
+    </span>
+    {% if ctx.is_staff %}
+      <form method="post" action="/actions/sync">
+        <input type="hidden" name="group" value="{{ ctx.group.id }}">
+        <input type="hidden" name="next" value="{{ url_with('/', group=ctx.group.id) }}">
+        <input type="hidden" name="term" value="{{ term }}">
+        <button class="btn btn-ghost btn-sm" type="submit">Обновить</button>
+      </form>
+    {% endif %}
+  {% else %}
+    <span class="muted small">Источник: polessu.by/ruz</span>
+  {% endif %}
+</div>
+{% endblock %}

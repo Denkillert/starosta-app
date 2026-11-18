@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}{{ document.title }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <a class="link small" href="{{ url_with('/documents', group=ctx.group.id) }}">← Все документы</a>
+    <h1>{{ document.title }}</h1>
+    <div class="chips">
+      <span class="badge type">{{ document.type|doc_label }}</span>
+      <span class="badge {{ document.status|doc_status_class }}">{{ document.status|doc_status_label }}</span>
+      {% if document.number %}<span class="badge">№ {{ document.number }}</span>{% endif %}
+      {% if document.issued_at %}<span class="badge">{{ document.issued_at|date_short }}</span>{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <dl class="detail-list">
+    <div><dt>Тип</dt><dd>{{ document.type|doc_label }}</dd></div>
+    <div><dt>Статус</dt><dd>{{ document.status|doc_status_label }}</dd></div>
+    {% if document.number %}<div><dt>Номер</dt><dd>№ {{ document.number }}</dd></div>{% endif %}
+    <div><dt>Дата выдачи</dt><dd>{{ document.issued_at|date_short }}</dd></div>
+    {% if document.valid_from or document.valid_to %}
+      <div>
+        <dt>Период</dt>
+        <dd>
+          {{ document.valid_from|date_short }}
+          {% if document.valid_from_time %} в {{ document.valid_from_time|hm }}{% endif %}
+          —
+          {{ document.valid_to|date_short }}
+          {% if document.valid_to_time %} до {{ document.valid_to_time|hm }}{% endif %}
+        </dd>
+      </div>
+    {% endif %}
+    {% if students %}
+      <div>
+        <dt>{{ 'Студенты' if students|length > 1 else 'Студент' }}</dt>
+        <dd>{% for item in students %}{{ item.full_name }}{% if not loop.last %}, {% endif %}{% endfor %}</dd>
+      </div>
+    {% endif %}
+    {% if document.reason %}
+      <div><dt>Основание</dt><dd>{{ document.reason }}</dd></div>
+    {% endif %}
+    {% if document.author %}
+      <div><dt>Создал</dt><dd>{{ document.author.full_name }}</dd></div>
+    {% endif %}
+    <div><dt>Обновлён</dt><dd>{{ document.updated_at.strftime('%d.%m.%Y %H:%M') }}</dd></div>
+    {% if excused_count is not none %}
+      <div><dt>Уважительных</dt><dd>{{ excused_count }} пар отмечено автоматически</dd></div>
+    {% endif %}
+  </dl>
+</section>
+
+{% if document.body %}
+  <section class="card">
+    <h2 class="card-title">Текст</h2>
+    <div class="body-text">{{ document.body }}</div>
+  </section>
+{% endif %}
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">Файл</h2>
+  </div>
+  {% if document.file_path %}
+    <p><a class="btn btn-ghost btn-sm" href="/files/{{ document.id }}" target="_blank" rel="noopener">Скачать {{ document.file_name }}</a></p>
+  {% else %}
+    <p class="muted small">Файл не прикреплён.</p>
+  {% endif %}
+  {% if ctx.is_staff %}
+    <form method="post" action="/actions/documents/{{ document.id }}/file" enctype="multipart/form-data" class="inline-form">
+      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+      <input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.txt" required>
+      <button class="btn btn-sm" type="submit">{{ 'Заменить' if document.file_path else 'Прикрепить' }}</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if ctx.is_staff %}
+  <section class="card">
+    <h2 class="card-title">Действия</h2>
+    {% if allowed %}
+      <div class="action-row">
+        {% for status, label in allowed %}
+          <form method="post" action="/actions/documents/{{ document.id }}/status">
+            <input type="hidden" name="group" value="{{ ctx.group.id }}">
+            <input type="hidden" name="status" value="{{ status }}">
+            <button class="btn btn-sm {{ 'btn-primary' if status in ['approved', 'active'] else ('btn-danger' if status in ['rejected', 'revoked'] else 'btn-ghost') }}" type="submit">{{ label }}</button>
+          </form>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted small">Для текущего статуса переходов нет.</p>
+    {% endif %}
+
+    <details class="danger-zone">
+      <summary class="link small danger">Удалить документ</summary>
+      <p class="muted small">
+        Удаление снимет автоматические «уважительные», если они были поставлены этим документом,
+        и удалит прикреплённый файл.
+      </p>
+      <form method="post" action="/actions/documents/{{ document.id }}/delete" data-confirm="Удалить документ без возможности восстановления?">
+        <input type="hidden" name="group" value="{{ ctx.group.id }}">
+        <button class="btn btn-danger btn-sm" type="submit">Удалить</button>
+      </form>
+    </details>
+  </section>
+{% endif %}
+
+<p class="muted small center">
+  Документ создан в неофициальном помощнике старосты. Юридическую силу определяет вуз.
+</p>
+{% endblock %}

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1f6feb">
+  <title>{% block title %}Староста{% endblock %} · {{ app_name }}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body class="page-{{ ctx.page }}">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="{{ url_with('/', group=ctx.group.id) }}">
+        <span class="brand-mark">С</span>
+        <span class="brand-text">
+          <span class="brand-name">Староста</span>
+          <span class="brand-sub">неофициальный помощник</span>
+        </span>
+      </a>
+      {% if ctx.group %}
+        <div class="topbar-right">
+          {% if ctx.groups|length > 1 %}
+            <form method="get" action="{{ request.url.path }}" class="group-switch">
+              {% if request.query_params.get('term') %}
+                <input type="hidden" name="term" value="{{ request.query_params.get('term') }}">
+              {% endif %}
+              <select name="group" onchange="this.form.submit()" aria-label="Группа">
+                {% for group, membership in ctx.groups %}
+                  <option value="{{ group.id }}" {% if group.id == ctx.group.id %}selected{% endif %}>{{ group.code }}</option>
+                {% endfor %}
+              </select>
+            </form>
+          {% else %}
+            <span class="group-chip">{{ ctx.group.code }}</span>
+          {% endif %}
+        </div>
+      {% endif %}
+    </div>
+  </header>
+
+  {% if ctx.flash %}<div class="flash flash-ok">{{ ctx.flash }}</div>{% endif %}
+  {% if ctx.error %}<div class="flash flash-err">{{ ctx.error }}</div>{% endif %}
+
+  <main class="container" id="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  {% if ctx.group %}
+    <nav class="tabbar" aria-label="Основная навигация">
+      <a href="{{ url_with('/', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'dashboard' }}">
+        <span class="tab-icon">⌂</span><span>Главная</span>
+      </a>
+      <a href="{{ url_with('/schedule', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'schedule' }}">
+        <span class="tab-icon">▤</span><span>Расписание</span>
+      </a>
+      <a href="{{ url_with('/journal', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'journal' }}">
+        <span class="tab-icon">✓</span><span>Журнал</span>
+      </a>
+      <a href="{{ url_with('/documents', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'documents' }}">
+        <span class="tab-icon">▣</span><span>Документы</span>
+      </a>
+      <a href="{{ url_with('/reports', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'reports' }}">
+        <span class="tab-icon">▥</span><span>Отчёты</span>
+      </a>
+    </nav>
+  {% endif %}
+
+  <script src="/static/app.js"></script>
+  <script>
+    // Внутри Telegram меняем initData на cookie-сессию: обычные переходы
+    // по ссылкам не умеют передавать заголовок X-Telegram-Init-Data.
+    (function () {
+      var tg = window.Telegram && window.Telegram.WebApp;
+      if (!tg || !tg.initData) return;
+      if (document.cookie.indexOf("starosta_auth=1") !== -1) return;
+      if (window.sessionStorage && sessionStorage.getItem("starosta_auth_tried")) return;
+      if (window.sessionStorage) sessionStorage.setItem("starosta_auth_tried", "1");
+      try { tg.ready(); tg.expand(); } catch (e) { /* старые клиенты */ }
+      fetch("/auth/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ init_data: tg.initData })
+      }).then(function (response) {
+        if (response.ok) window.location.reload();
+      }).catch(function () { /* остаёмся в гостевом режиме */ });
+    })();
+  </script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

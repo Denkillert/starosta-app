@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Начало работы{% endblock %}
+{% block content %}
+<section class="onboarding-hero">
+  <div class="brand-mark brand-mark-xl">С</div>
+  <h1>Староста</h1>
+  <p class="muted">
+    Расписание ПолесГУ, журнал посещаемости, распоряжения, заявления и справки —
+    в одном месте. Без подписок и рекламы.
+  </p>
+</section>
+
+{% if settings.dev_mode and not ctx.groups %}
+  <section class="card callout">
+    <h2 class="card-title">Быстрый старт</h2>
+    <p class="muted">
+      Загрузить демо-группу <b>24ИТ-2</b>: расписание с сайта ПолесГУ, 12 студентов,
+      примеры распоряжения, справки и заявления. Можно всё удалить и начать заново.
+    </p>
+    <form method="post" action="/actions/demo">
+      <button class="btn btn-primary btn-block" type="submit">Загрузить демо 24ИТ-2</button>
+    </form>
+  </section>
+{% endif %}
+
+<div class="two-col">
+  <section class="card">
+    <h2 class="card-title">Создать группу</h2>
+    <p class="muted small">Вы станете старостой и получите код приглашения для одногруппников.</p>
+    <form method="post" action="/actions/groups/create" class="stack">
+      <label class="field">
+        <span>Номер группы</span>
+        <input name="code" placeholder="24ИТ-2" required maxlength="32" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Название (необязательно)</span>
+        <input name="name" placeholder="Информационные технологии" maxlength="160">
+      </label>
+      <button class="btn btn-primary" type="submit">Создать</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2 class="card-title">Присоединиться</h2>
+    <p class="muted small">Введите код приглашения, который дал староста.</p>
+    <form method="post" action="/actions/groups/join" class="stack">
+      <label class="field">
+        <span>Код приглашения</span>
+        <input name="invite_code" placeholder="ABC123" required maxlength="16" autocomplete="off" class="code-input">
+      </label>
+      <button class="btn" type="submit">Присоединиться</button>
+    </form>
+  </section>
+</div>
+
+<section class="card note">
+  <h2 class="card-title">Что внутри</h2>
+  <ul class="check-list">
+    <li>Импорт расписания с <span class="mono">polessu.by/ruz</span> по номеру группы.</li>
+    <li>Журнал посещаемости: был, опоздал, не был, уважительная.</li>
+    <li>Распоряжения и справки автоматически ставят «уважительную» на свои даты.</li>
+    <li>Заявления студентов со статусами и историей.</li>
+    <li>Статистика и выгрузка в CSV. Ведомости — заглушка на будущее.</li>
+  </ul>
+</section>
+
+<p class="muted small center">
+  Неофициальный проект. При расхождении данных приоритет у расписания вуза.
+</p>
+{% endblock %}

@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Журнал{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Журнал</h1>
+    <p class="muted">{{ day|date_ru(with_weekday=True) }}</p>
+  </div>
+  <div class="date-nav">
+    <a class="btn btn-ghost btn-sm" href="{{ url_with('/journal', group=ctx.group.id, date=prev_day|iso, term=ctx.term) }}">←</a>
+    <form method="get" action="/journal" class="date-form">
+      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+      <input type="hidden" name="term" value="{{ ctx.term }}">
+      <input type="date" name="date" value="{{ day|iso }}" onchange="this.form.submit()" aria-label="Дата">
+    </form>
+    <a class="btn btn-ghost btn-sm" href="{{ url_with('/journal', group=ctx.group.id, date=next_day|iso, term=ctx.term) }}">→</a>
+  </div>
+</section>
+
+{% if not ctx.is_staff %}
+  <div class="note card small">
+    Журнал доступен для просмотра. Отмечает посещаемость староста или заместитель.
+    Пропуск по уважительной причине подтверждается документом.
+  </div>
+{% endif %}
+
+{% if not views %}
+  <section class="card callout">
+    <h2 class="card-title">В этот день пар нет</h2>
+    <p class="muted">Если пары нет в расписании вуза, её нет и здесь.</p>
+    <a class="btn btn-ghost" href="{{ url_with('/schedule', group=ctx.group.id, date=day|iso) }}">Открыть расписание</a>
+  </section>
+{% else %}
+  <section class="card att-card">
+    <div class="att-scroll">
+      <table class="att-table">
+        <thead>
+          <tr>
+            <th class="att-name-col">Студент</th>
+            {% for view in views %}
+              <th class="att-lesson-col">
+                <span class="att-subject">{{ view.lesson.subject.name }}</span>
+                <span class="att-time">
+                  {{ view.lesson.start_time|hm }}–{{ view.lesson.end_time|hm }}{% if view.lesson.room %} · ауд. {{ view.lesson.room }}{% endif %}
+                </span>
+                {% if view.lesson.subgroup %}<span class="att-room">{{ view.lesson.subgroup }}</span>{% endif %}
+                <span class="att-count{% if view.marked %} is-partial{% endif %}">
+                  <b>{{ view.present }}</b>/{{ view.total }} присутствуют
+                </span>
+                {% if view.occurrence.note %}
+                  <span class="att-note">{{ view.occurrence.note }}</span>
+                {% endif %}
+                {% if ctx.is_staff %}
+                  <details class="att-note-edit">
+                    <summary>{{ 'Заметка' if view.occurrence.note else '+ заметка' }}</summary>
+                    <form method="post" action="/actions/occurrences/{{ view.occurrence.id }}/note" class="att-note-form">
+                      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+                      <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
+                      <textarea name="note" rows="2" maxlength="2000" placeholder="Видно всем студентам">{{ view.occurrence.note or '' }}</textarea>
+                      <button class="btn btn-sm" type="submit">Сохранить</button>
+                    </form>
+                  </details>
+                {% endif %}
+              </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for member in roster %}
+            <tr>
+              <th class="att-name-col">
+                <span class="att-num">{{ loop.index }}</span>
+                <span class="att-student" title="{{ member.full_name }}">{{ member.full_name|short_name }}</span>
+                {% if member.role != 'student' %}<span class="badge">{{ member.role|role_label }}</span>{% endif %}
+              </th>
+              {% for view in views %}
+                {% set status = view.status_for(member.id) %}
+                <td class="att-cell att-{{ status }}">
+                  {% if ctx.is_staff and status != 'excused' %}
+                    <form method="post" action="/actions/attendance/toggle" class="att-form">
+                      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+                      <input type="hidden" name="occurrence_id" value="{{ view.occurrence.id }}">
+                      <input type="hidden" name="member_id" value="{{ member.id }}">
+                      <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
+                      <button type="submit"
+                              class="att-btn att-btn-{{ status }}"
+                              title="{% if status == 'absent' %}Вернуть «присутствует»{% else %}Отметить пропуск{% endif %} · {{ member.full_name }} · {{ view.lesson.subject.name }}">
+                        {{ view.symbol_for(member.id) }}
+                      </button>
+                    </form>
+                  {% else %}
+                    <span class="att-btn att-btn-{{ status }}"{% if status == 'excused' %} title="Уважительная причина по документу"{% endif %}>{{ view.symbol_for(member.id) }}</span>
+                  {% endif %}
+                </td>
+              {% endfor %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="att-legend muted small">
+      <span><b class="ok">✓</b> — присутствует</span>
+      <span><b class="bad">Н</b> — пропуск</span>
+      <span><b class="excused">У</b> — уважительная (по документу)</span>
+    </div>
+
+    {% if ctx.is_staff %}
+      <form method="post" action="/actions/attendance/reset-day" class="att-reset"
+            data-confirm="Снять ручные отметки за этот день? Уважительные по документам останутся.">
+        <input type="hidden" name="group" value="{{ ctx.group.id }}">
+        <input type="hidden" name="date" value="{{ day|iso }}">
+        <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
+        <button class="btn btn-ghost btn-sm" type="submit">Снять отметки за день</button>
+      </form>
+    {% endif %}
+  </section>
+
+  <p class="muted small center">
+    По умолчанию все присутствуют. Нажмите на зелёную галочку, чтобы отметить пропуск.
+    «У» ставится автоматически, если на эту пару действует распоряжение или справка.
+  </p>
+{% endif %}
+{% endblock %}

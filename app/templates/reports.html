@@ -1,0 +1,177 @@
+{% extends "base.html" %}
+{% block title %}Отчёты{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Ведомости за месяц</h1>
+    <p class="muted">{{ report.month_name }} {{ report.year }} · группа {{ ctx.group.code }}</p>
+  </div>
+  <div class="date-nav">
+    <a class="btn btn-ghost btn-sm" href="{{ url_with('/reports', group=ctx.group.id, month=prev_month) }}">←</a>
+    <form method="get" action="/reports" class="date-form">
+      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+      <input type="month" name="month" value="{{ month_value }}" onchange="this.form.submit()" aria-label="Месяц">
+    </form>
+    <a class="btn btn-ghost btn-sm" href="{{ url_with('/reports', group=ctx.group.id, month=next_month) }}">→</a>
+  </div>
+</section>
+
+<section class="report-grid">
+  <article class="card report-card">
+    <div class="report-head">
+      <span class="badge type">Пропуски</span>
+      <span class="muted small">{{ report.first|date_short }} — {{ report.last|date_short }}</span>
+    </div>
+    <h2 class="card-title">Ведомость учета учебных часов, пропущенных студентами</h2>
+    <p class="muted small">
+      Студенты × дни месяца, часы, ИТОГО, пропуски по уважительной и без
+      уважительной причины, списки справок, заявлений и распоряжений,
+      часы отработки по дисциплинам.
+    </p>
+    <div class="report-stats">
+      <div><b>{{ report.total_hours }}</b><span>часов всего</span></div>
+      <div><b class="ok">{{ report.excused_hours }}</b><span>по уваж.</span></div>
+      <div><b class="bad">{{ report.absent_hours }}</b><span>без уваж.</span></div>
+    </div>
+    <div class="chips">
+      <span class="chip">Справки: {{ report.certificates|length }}</span>
+      <span class="chip">Заявления: {{ report.statements|length }}</span>
+      <span class="chip">Распоряжения: {{ report.orders|length }}</span>
+    </div>
+    <a class="btn btn-primary" href="{{ url_with('/reports/propuski.docx', group=ctx.group.id, month=month_value) }}">
+      Скачать .docx
+    </a>
+  </article>
+
+  <article class="card report-card">
+    <div class="report-head">
+      <span class="badge type">Отработки</span>
+      <span class="muted small">{{ settings.paid_lesson_rate|string|replace('.', ',') }} BYN за пару</span>
+    </div>
+    <h2 class="card-title">Ведомость платных отработок</h2>
+    <p class="muted small">
+      Отдельная таблица на каждый предмет и преподавателя: дата пропуска,
+      сумма к оплате, номер операции в ЕРИП, дата оплаты и подпись.
+    </p>
+    <div class="report-stats">
+      <div><b>{{ paid.groups|length }}</b><span>предметов</span></div>
+      <div><b>{{ paid.entries_count }}</b><span>пропусков</span></div>
+      <div><b>{{ '%.2f'|format(paid.total)|replace('.', ',') }}</b><span>BYN к оплате</span></div>
+    </div>
+    {% if paid.groups %}
+      <div class="paid-subjects">
+        {% for group in paid.groups %}
+          <div class="paid-subject">
+            <span>{{ group.subject }}</span>
+            <span class="muted small">{{ group.teacher }} · {{ group.entries|length }} · {{ '%.2f'|format(group.total)|replace('.', ',') }} BYN</span>
+          </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <p class="muted small">Неуважительных пропусков за месяц нет.</p>
+    {% endif %}
+    <a class="btn btn-primary" href="{{ url_with('/reports/paid.docx', group=ctx.group.id, month=month_value) }}">
+      Скачать .docx
+    </a>
+  </article>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">Пропуски по студентам</h2>
+    <span class="muted small">часы за {{ report.month_genitive }}</span>
+  </div>
+  {% if report.students %}
+    <div class="table-scroll">
+      <table class="simple-table">
+        <thead>
+          <tr>
+            <th>Студент</th>
+            <th>Форма</th>
+            <th>Всего</th>
+            <th>По уваж.</th>
+            <th>Без уваж.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in report.students %}
+            <tr>
+              <td>{{ item.member.full_name }}</td>
+              <td>{{ item.member.funding|funding_short }}</td>
+              <td>{{ item.total_hours }}</td>
+              <td class="ok">{{ item.excused_hours }}</td>
+              <td class="bad">{{ item.absent_hours }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <p class="muted small">В группе пока нет студентов.</p>
+  {% endif %}
+</section>
+
+{% if report.paid_work %}
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">Количество часов отработки</h2>
+      <span class="muted small">неуважительные пропуски по дисциплинам</span>
+    </div>
+    <div class="table-scroll">
+      <table class="simple-table">
+        <thead>
+          <tr>
+            <th>Студент</th>
+            <th>Дисциплина</th>
+            <th>Часов отработки</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for line in report.paid_work %}
+            <tr>
+              <td>{{ line.student }}</td>
+              <td>{{ line.subject }}</td>
+              <td>{{ line.hours }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+
+<section class="card">
+  <h2 class="card-title">Документы месяца</h2>
+  <div class="report-docs">
+    <div>
+      <h3>Справки</h3>
+      {% for line in report.certificates %}
+        <div class="report-doc"><span>{{ line.student }}</span><span class="muted small">{{ line.period }}</span></div>
+      {% else %}
+        <p class="muted small">Нет справок.</p>
+      {% endfor %}
+    </div>
+    <div>
+      <h3>Заявления</h3>
+      {% for line in report.statements %}
+        <div class="report-doc"><span>{{ line.student }}</span><span class="muted small">{{ line.period }}</span></div>
+      {% else %}
+        <p class="muted small">Нет заявлений.</p>
+      {% endfor %}
+    </div>
+    <div>
+      <h3>Распоряжения</h3>
+      {% for line in report.orders %}
+        <div class="report-doc"><span>{{ line.student }}</span><span class="muted small">{{ line.period }}{% if line.number %} №{{ line.number }}{% endif %}</span></div>
+      {% else %}
+        <p class="muted small">Нет распоряжений.</p>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
+<p class="muted small center">
+  В ведомость попадают только отмеченные пропуски. Уважительные — по действующим
+  распоряжениям и справкам. Юридическую силу документов определяет вуз.
+</p>
+{% endblock %}

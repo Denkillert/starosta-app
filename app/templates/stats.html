@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Статистика{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Статистика</h1>
+    <p class="muted">{{ date_from|date_short }} — {{ date_to|date_short }}</p>
+  </div>
+  <a class="btn btn-ghost btn-sm" href="/stats.csv?group={{ ctx.group.id }}&from={{ date_from|iso }}&to={{ date_to|iso }}">CSV</a>
+</section>
+
+<form method="get" action="/stats" class="card filter-form">
+  <input type="hidden" name="group" value="{{ ctx.group.id }}">
+  <label class="field">
+    <span>С</span>
+    <input type="date" name="from" value="{{ date_from|iso }}">
+  </label>
+  <label class="field">
+    <span>По</span>
+    <input type="date" name="to" value="{{ date_to|iso }}">
+  </label>
+  <button class="btn btn-primary btn-sm" type="submit">Показать</button>
+</form>
+
+<section class="stat-grid">
+  <div class="stat card">
+    <div class="stat-value {{ totals.percent|percent_class }}">{{ totals.percent }}%</div>
+    <div class="stat-label">посещаемость</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value">{{ totals.attended }}</div>
+    <div class="stat-label">посещено</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value {{ 'bad' if totals.absent else '' }}">{{ totals.absent }}</div>
+    <div class="stat-label">пропущено</div>
+  </div>
+  <div class="stat card">
+    <div class="stat-value">{{ totals.excused }}</div>
+    <div class="stat-label">уважительных</div>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">По студентам</h2>
+    <span class="muted small">отметок: {{ totals.total }}</span>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Студент</th>
+          <th>Был</th>
+          <th>Пропуск</th>
+          <th>Уваж.</th>
+          <th class="wide">Посещаемость</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in stats %}
+          <tr>
+            <td>{{ item.member.full_name }}</td>
+            <td>{{ item.present }}</td>
+            <td class="{{ 'bad' if item.absent else '' }}">{{ item.absent }}</td>
+            <td>{{ item.excused }}</td>
+            <td>
+              <div class="progress-row">
+                <div class="progress"><div class="progress-bar {{ item.percent|percent_class }}" style="width: {{ item.percent if item.percent is not none else 0 }}%"></div></div>
+                <span class="small {{ item.percent|percent_class }}">{{ item.percent if item.percent is not none else '—' }}{% if item.percent is not none %}%{% endif %}</span>
+              </div>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="empty">Нет данных за период.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">По предметам</h2>
+  </div>
+  <div class="table-wrap">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Предмет</th>
+          <th>Отметок</th>
+          <th>Посещено</th>
+          <th>Пропущено</th>
+          <th>Уваж.</th>
+          <th>%</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for subject in subjects %}
+          <tr>
+            <td>{{ subject.name }}</td>
+            <td>{{ subject.total }}</td>
+            <td>{{ subject.attended }}</td>
+            <td class="{{ 'bad' if subject.absent else '' }}">{{ subject.absent }}</td>
+            <td>{{ subject.excused }}</td>
+            <td class="{{ subject.percent|percent_class }}">{{ subject.percent if subject.percent is not none else '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6" class="empty">Нет отметок за период.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<p class="muted small center">
+  Процент = был / (был + пропуск). «Уважительная» не входит в знаменатель.
+  Отсутствие отметки означает присутствие.
+</p>
+{% endblock %}

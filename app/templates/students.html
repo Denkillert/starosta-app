@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block title %}Студенты{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Студенты</h1>
+    <p class="muted">{{ month_start|date_short }} — {{ today|date_short }}</p>
+  </div>
+  <a class="btn btn-ghost btn-sm" href="{{ url_with('/stats', group=ctx.group.id) }}">Статистика</a>
+</section>
+
+<section class="card invite-card">
+  <div>
+    <div class="muted small">Код приглашения в группу {{ ctx.group.code }}</div>
+    <div class="invite-code" id="invite-code">{{ ctx.group.invite_code }}</div>
+    <div class="muted small">Студент открывает приложение и вводит этот код.</div>
+  </div>
+  <button class="btn btn-ghost btn-sm" type="button" data-copy="{{ ctx.group.invite_code }}">Скопировать</button>
+</section>
+
+{% if ctx.is_staff %}
+  <section class="card">
+    <h2 class="card-title">Добавить студента</h2>
+    <p class="muted small">Telegram не обязателен: студент сможет привязать аккаунт позже по коду и ФИО.</p>
+    <form method="post" action="/actions/students/add" class="add-form">
+      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+      <label class="field grow">
+        <span>ФИО</span>
+        <input name="full_name" placeholder="Иванов Иван Иванович" required maxlength="160" autocomplete="off">
+      </label>
+      <label class="field">
+        <span>Роль</span>
+        <select name="role">
+          <option value="student">Студент</option>
+          <option value="deputy">Заместитель</option>
+        </select>
+      </label>
+      <label class="field">
+        <span>Форма</span>
+        <select name="funding">
+          {% for value, label in Funding.LABELS.items() %}
+            <option value="{{ value }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="btn btn-primary" type="submit">Добавить</button>
+    </form>
+  </section>
+{% endif %}
+
+<section class="card">
+  <div class="card-head">
+    <h2 class="card-title">Состав группы</h2>
+    <span class="muted small">{{ members|length }}</span>
+  </div>
+  <div class="members">
+    {% for member in members %}
+      {% set stat = stats_by_member.get(member.id) %}
+      <div class="member {{ 'is-left' if member.status != 'active' }}">
+        <div class="member-main">
+          <div class="member-name">
+            {{ member.full_name }}
+            {% if member.id == ctx.membership.id %}<span class="badge info">это вы</span>{% endif %}
+          </div>
+          <div class="member-meta">
+            <span class="badge">{{ member.role|role_label }}</span>
+            <span class="badge">{{ member.funding|funding_label }}</span>
+            <span class="badge {{ 'bad' if member.status != 'active' else 'muted' }}">{{ member.status|member_status_label }}</span>
+            {% if member.user and member.user.telegram_id %}
+              <span class="muted small">Telegram привязан</span>
+            {% else %}
+              <span class="muted small">без Telegram</span>
+            {% endif %}
+          </div>
+          {% if stat %}
+            <div class="member-progress">
+              <div class="progress"><div class="progress-bar {{ stat.percent|percent_class }}" style="width: {{ stat.percent if stat.percent is not none else 0 }}%"></div></div>
+              <span class="small {{ stat.percent|percent_class }}">
+                {{ stat.percent if stat.percent is not none else '—' }}{% if stat.percent is not none %}%{% endif %}
+                · был {{ stat.present }} · пропуск {{ stat.absent }} · уваж. {{ stat.excused }}
+              </span>
+            </div>
+          {% endif %}
+        </div>
+
+        {% if ctx.is_staff %}
+          <details class="member-edit">
+            <summary class="link small">Изменить</summary>
+            <form method="post" action="/actions/students/{{ member.id }}/update" class="stack">
+              <input type="hidden" name="group" value="{{ ctx.group.id }}">
+              <div class="form-row">
+                <label class="field">
+                  <span>Роль</span>
+                  <select name="role">
+                    {% for role, label in Role.LABELS.items() %}
+                      <option value="{{ role }}" {% if member.role == role %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Статус</span>
+                  <select name="status">
+                    {% for status, label in MemberStatus.LABELS.items() %}
+                      <option value="{{ status }}" {% if member.status == status %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                  </select>
+                </label>
+              </div>
+              <label class="field">
+                <span>Форма обучения</span>
+                <select name="funding">
+                  {% for value, label in Funding.LABELS.items() %}
+                    <option value="{{ value }}" {% if member.funding == value %}selected{% endif %}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </label>
+              <button class="btn btn-sm" type="submit">Сохранить</button>
+            </form>
+          </details>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="empty">В группе пока нет студентов.</div>
+    {% endfor %}
+  </div>
+</section>
+
+<p class="muted small center">
+  Посещаемость считается за текущий месяц. «Уважительная» не портит процент.
+</p>
+{% endblock %}

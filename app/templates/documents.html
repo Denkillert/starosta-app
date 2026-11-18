@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}Документы{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Документы</h1>
+    <p class="muted">Распоряжения, заявления и справки</p>
+  </div>
+  {% if ctx.is_staff %}
+    <a class="btn btn-primary btn-sm" href="{{ url_with('/documents/new', group=ctx.group.id, type=selected_type or 'order') }}">Создать</a>
+  {% endif %}
+</section>
+
+<div class="tabs tabs-wrap">
+  <a class="tab {{ 'active' if not selected_type }}" href="{{ url_with('/documents', group=ctx.group.id, status=selected_status) }}">
+    Все <span class="tab-count">{{ counts.values()|sum }}</span>
+  </a>
+  {% for type, label in DocType.LABELS.items() %}
+    <a class="tab {{ 'active' if selected_type == type }}" href="{{ url_with('/documents', group=ctx.group.id, type=type, status=selected_status) }}">
+      {{ label }} <span class="tab-count">{{ counts[type] }}</span>
+    </a>
+  {% endfor %}
+</div>
+
+<form method="get" action="/documents" class="filter-row">
+  <input type="hidden" name="group" value="{{ ctx.group.id }}">
+  {% if selected_type %}<input type="hidden" name="type" value="{{ selected_type }}">{% endif %}
+  <label class="field compact">
+    <span>Статус</span>
+    <select name="status" onchange="this.form.submit()">
+      <option value="">Все статусы</option>
+      {% for status, label in DocStatus.LABELS.items() %}
+        <option value="{{ status }}" {% if selected_status == status %}selected{% endif %}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+</form>
+
+{% if ctx.is_staff %}
+  <div class="create-row">
+    {% for type, label in DocType.LABELS.items() %}
+      <a class="chip info" href="{{ url_with('/documents/new', group=ctx.group.id, type=type) }}">+ {{ label }}</a>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<div class="doc-list">
+  {% for document in items %}
+    <a class="card doc-card" href="{{ url_with('/documents/' ~ document.id, group=ctx.group.id) }}">
+      <div class="doc-top">
+        <span class="badge type">{{ document.type|doc_label }}</span>
+        <span class="badge {{ document.status|doc_status_class }}">{{ document.status|doc_status_label }}</span>
+      </div>
+      <div class="doc-title">{{ document.title }}</div>
+      <div class="muted small">
+        {% if document.number %}№ {{ document.number }} · {% endif %}
+        {{ document.issued_at|date_short }}
+        {% if document.students %}
+          · {% for student in document.students %}{{ student.full_name }}{% if not loop.last %}, {% endif %}{% endfor %}
+        {% elif document.student %}
+          · {{ document.student.full_name }}
+        {% endif %}
+      </div>
+      {% if document.valid_from or document.valid_to %}
+        <div class="small muted">
+          Период: {{ document.valid_from|date_short }}
+          {% if document.valid_from_time %} {{ document.valid_from_time|hm }}{% endif %}
+          — {{ document.valid_to|date_short }}
+          {% if document.valid_to_time %} {{ document.valid_to_time|hm }}{% endif %}
+        </div>
+      {% endif %}
+      {% if document.reason %}<div class="small">Основание: {{ document.reason }}</div>{% endif %}
+    </a>
+  {% else %}
+    <section class="card empty">
+      Пока нет документов. {% if ctx.is_staff %}Создайте первый — кнопка «Создать» выше.{% endif %}
+    </section>
+  {% endfor %}
+</div>
+{% endblock %}

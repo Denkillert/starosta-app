@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Расписание{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <h1>Расписание</h1>
+    <p class="muted">
+      {{ start|date_short }} — {{ end|date_short }}
+      {% if week %} · неделя {{ week.number }}{% endif %}
+    </p>
+  </div>
+  {% if ctx.is_staff %}
+    <form method="post" action="/actions/sync">
+      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+      <input type="hidden" name="next" value="{{ url_with('/schedule', group=ctx.group.id, date=day|iso, term=term) }}">
+      <input type="hidden" name="term" value="{{ term }}">
+      <button class="btn btn-ghost btn-sm" type="submit">Обновить</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if term_options|length > 1 %}
+  <div class="tabs">
+    {% for option in term_options %}
+      <a class="tab {{ 'active' if option.term == term }}"
+         href="{{ url_with('/schedule', group=ctx.group.id, term=option.term, date=option.start|iso) }}">
+        {{ option.term }} семестр
+      </a>
+    {% endfor %}
+  </div>
+{% endif %}
+
+<div class="toolbar">
+  <a class="btn btn-ghost btn-sm" href="{{ url_with('/schedule', group=ctx.group.id, term=term, date=prev_week|iso) }}">← Неделя</a>
+  <a class="btn btn-ghost btn-sm" href="{{ url_with('/schedule', group=ctx.group.id, term=term, date=today|iso) }}">Сегодня</a>
+  <a class="btn btn-ghost btn-sm" href="{{ url_with('/schedule', group=ctx.group.id, term=term, date=next_week|iso) }}">Неделя →</a>
+</div>
+
+{% if not weeks %}
+  <section class="card callout">
+    <h2 class="card-title">Расписание не загружено</h2>
+    <p class="muted">Импортируйте его с сайта ПолесГУ по кнопке «Обновить».</p>
+  </section>
+{% endif %}
+
+<div class="week">
+  {% for day in days %}
+    {% if day.lessons or day.date.weekday() < 5 %}
+      <section class="day {{ 'is-today' if day.date == today }}">
+        <header class="day-head">
+          <span class="day-name">{{ day.date|date_ru(with_weekday=True) }}</span>
+          {% if day.date == today %}<span class="badge info">сегодня</span>{% endif %}
+        </header>
+        {% if day.lessons %}
+          {% for occurrence in day.lessons %}
+            {% set lesson = occurrence.lesson %}
+            <article class="lesson">
+              <div class="lesson-time">{{ lesson.start_time|hm }}<span>{{ lesson.end_time|hm }}</span></div>
+              <div class="lesson-main">
+                <div class="lesson-subject">{{ lesson.subject.name }}</div>
+                <div class="lesson-meta">
+                  {% if lesson.kind %}<span class="badge">{{ lesson.kind }}</span>{% endif %}
+                  {% if lesson.room %}ауд. {{ lesson.room }}{% endif %}
+                  {% if lesson.subgroup %} · {{ lesson.subgroup }}{% endif %}
+                  {% if lesson.teacher %} · {{ lesson.teacher }}{% endif %}
+                </div>
+                {% if occurrence.note %}
+                  <div class="lesson-note">{{ occurrence.note }}</div>
+                {% endif %}
+                {% if ctx.is_staff %}
+                  <details class="lesson-note-edit">
+                    <summary class="link small">{{ 'Изменить заметку' if occurrence.note else 'Добавить заметку' }}</summary>
+                    <form method="post" action="/actions/occurrences/{{ occurrence.id }}/note" class="note-form">
+                      <input type="hidden" name="group" value="{{ ctx.group.id }}">
+                      <input type="hidden" name="next" value="{{ url_with('/schedule', group=ctx.group.id, date=day.date|iso, term=term) }}">
+                      <textarea name="note" rows="2" maxlength="2000" placeholder="Заметку видят все студенты группы">{{ occurrence.note or '' }}</textarea>
+                      <button class="btn btn-sm" type="submit">Сохранить</button>
+                    </form>
+                  </details>
+                {% endif %}
+              </div>
+              <div class="lesson-side">
+                {% if ctx.is_staff %}
+                  <a class="chip info" href="{{ url_with('/journal', group=ctx.group.id, date=day.date|iso, term=term) }}">отметить</a>
+                {% endif %}
+              </div>
+            </article>
+          {% endfor %}
+        {% else %}
+          <div class="empty small">Пар нет</div>
+        {% endif %}
+      </section>
+    {% endif %}
+  {% endfor %}
+</div>
+
+{% if last_sync %}
+  <p class="muted small center">
+    Источник: polessu.by · последние изменения {{ last_sync.updated or '—' }}
+    · проверено {{ last_sync.fetched_at.strftime('%d.%m %H:%M') }}
+  </p>
+{% endif %}
+{% endblock %}

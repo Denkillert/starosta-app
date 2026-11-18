@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}{{ type_|doc_label }}{% endblock %}
+{% block content %}
+<section class="page-head">
+  <div>
+    <a class="link small" href="{{ url_with('/documents', group=ctx.group.id) }}">← Все документы</a>
+    <h1>{{ type_|doc_label }}</h1>
+    <p class="muted">
+      {% if type_ == 'order' %}
+        Освобождение студента от занятий на указанный период.
+      {% elif type_ == 'certificate' %}
+        Справка подтверждает уважительную причину отсутствия.
+      {% else %}
+        Заявление студента рассматривает староста.
+      {% endif %}
+    </p>
+  </div>
+</section>
+
+<div class="tabs tabs-wrap">
+  {% for type, label in DocType.LABELS.items() %}
+    <a class="tab {{ 'active' if type == type_ }}" href="{{ url_with('/documents/new', group=ctx.group.id, type=type) }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+<form method="post" action="/actions/documents/create" enctype="multipart/form-data" class="card stack">
+  <input type="hidden" name="group" value="{{ ctx.group.id }}">
+  <input type="hidden" name="type" value="{{ type_ }}">
+
+  <label class="field">
+    <span>
+      {{ 'Кого освобождаем' if type_ == 'order' else 'Студент' }}
+      <span class="muted small">(можно выбрать несколько)</span>
+    </span>
+    <select name="student_ids" multiple required size="{{ 6 if students|length > 6 else (students|length or 2) }}">
+      {% for student in students %}
+        <option value="{{ student.id }}">{{ student.full_name }} · {{ student.funding|funding_label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+
+  <div class="form-row">
+    {% if type_ == 'order' %}
+      <label class="field">
+        <span>Номер распоряжения</span>
+        <input name="number" maxlength="64" placeholder="Например, 185" autocomplete="off" required>
+      </label>
+    {% endif %}
+    <label class="field">
+      <span>Дата документа</span>
+      <input type="date" name="issued_at" value="{{ today|iso }}" required>
+    </label>
+  </div>
+
+  {% if type_ in ['order', 'certificate'] %}
+    <div class="form-row">
+      <label class="field">
+        <span>{{ 'Освободить с' if type_ == 'order' else 'Период с' }}</span>
+        <input type="date" name="valid_from" value="{{ today|iso }}" required>
+      </label>
+      <label class="field">
+        <span>по</span>
+        <input type="date" name="valid_to" value="{{ today|iso }}" required>
+      </label>
+    </div>
+
+    <div class="form-row">
+      <label class="field">
+        <span>Время с <span class="muted small">(необязательно)</span></span>
+        <input type="time" name="valid_from_time" aria-label="Время начала">
+      </label>
+      <label class="field">
+        <span>Время по <span class="muted small">(необязательно)</span></span>
+        <input type="time" name="valid_to_time" aria-label="Время окончания">
+      </label>
+    </div>
+
+    <p class="muted small">
+      Если время не заполнено, документ действует весь день. «У» ставится только
+      на пары, которые пересекаются с этим периодом.
+    </p>
+  {% endif %}
+
+  <label class="field">
+    <span>Файл <span class="muted small">(необязательно)</span></span>
+    <input type="file" name="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.doc,.docx,.txt">
+  </label>
+
+  <div class="note small">
+    {% if type_ == 'order' %}
+      Распоряжение сразу действует: номер, дата и период попадут в ведомость,
+      а «У» встанет автоматически.
+    {% elif type_ == 'certificate' %}
+      Справка сразу действует: «У» встанет автоматически на пары в указанный период.
+    {% else %}
+      Заявление создаётся со статусом «На рассмотрении». Решение принимается
+      на странице документа. Само заявление «У» не ставит.
+    {% endif %}
+  </div>
+
+  <div class="form-actions">
+    <a class="btn btn-ghost" href="{{ url_with('/documents', group=ctx.group.id) }}">Отмена</a>
+    <button class="btn btn-primary" type="submit">Создать</button>
+  </div>
+</form>
+{% endblock %}
