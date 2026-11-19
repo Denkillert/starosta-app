@@ -100,6 +100,13 @@ class Membership(Base, TimestampMixin):
     student_no: Mapped[str | None] = mapped_column(String(32), nullable=True)
     # Форма обучения: budget (бюджет) или paid (платно).
     funding: Mapped[str] = mapped_column(String(16), default="budget", nullable=False)
+    # Подгруппа для лабораторных: 1, 2 или NULL (не указана).
+    subgroup: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # TRUE — участник вступил по коду приглашения, но староста ещё не проверил
+    # ФИО/подгруппу. Такие заявки показываются отдельным блоком.
+    needs_review: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
     joined_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False
     )

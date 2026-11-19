@@ -96,11 +96,3 @@ def parse_int(value, default: int | None = None) -> int | None:
 
 
 def parse_date(value: str | None, default: date | None = None) -> date | None:
-    if not value:
-        return default
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
-        try:
-            return datetime.strptime(value, fmt).date()
-        except ValueError:
-            continue
-    return default

@@ -1,98 +1,274 @@
-# Настройка кодировки для корректного вывода кириллицы
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
+﻿#requires -Version 5.1
 
-$projectRoot = $PSScriptRoot
-$envPath = Join-Path $projectRoot ".env"
-$cloudflaredPath = Join-Path $projectRoot "tools\cloudflared.exe"
-$venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+# Запуск проекта "Староста":
+#   1. веб-сервер (0.0.0.0:8000 — доступен и из локальной сети)
+#   2. HTTPS-туннель: cloudflared, а если он не смог — SSH-туннель localhost.run
+#      (мобильные операторы часто подменяют DNS для *.trycloudflare.com)
+#   3. .env с актуальным адресом туннеля
+#   4. бот (сам обновит кнопку меню в Telegram)
+#
+# TUNNEL_PROVIDER=auto|cloudflare|ssh — принудительный выбор туннеля.
+
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# Полный лог запуска — пригодится, если что-то пойдёт не так.
+$transcriptPath = Join-Path $env:TEMP 'starosta-start.log'
+try {
+    Start-Transcript -Path $transcriptPath -Append -Force | Out-Null
+} catch {
+    # Транскрипт вспомогательный: без него запуск тоже работает.
+}
+
+# Без этого любая ошибка закрывала бы окно вместе с текстом ошибки.
+trap {
+    Write-Host ""
+    Write-Host "ОШИБКА: $($_.Exception.Message)" -ForegroundColor Red
+    if ($_.InvocationInfo) {
+        Write-Host "Строка $($_.InvocationInfo.ScriptLineNumber): $($_.InvocationInfo.Line.Trim())" -ForegroundColor DarkGray
+    }
+    Write-Host "Лог: $transcriptPath" -ForegroundColor DarkGray
+    Read-Host "Enter для выхода"
+    exit 1
+}
+
+$root = $PSScriptRoot
+$envPath = Join-Path $root '.env'
+$cloudflaredPath = Join-Path $root 'tools\cloudflared.exe'
+$pythonExe = Join-Path $root '.venv\Scripts\python.exe'
+$port = 8000
+$errLog = Join-Path $env:TEMP 'cloudflared.log'
+$sshExe = Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
+$sshLog = Join-Path $env:TEMP 'ssh-tunnel.log'
+$sshErrLog = Join-Path $env:TEMP 'ssh-tunnel.err.log'
+$knownHosts = Join-Path $env:TEMP 'starosta-known_hosts'
+
+$urlPatternCloudflare = 'https://[a-z0-9-]+\.trycloudflare\.com'
+$urlPatternSsh = 'https://[a-z0-9-]+\.(?:app\.)?lhr\.life|https://[a-z0-9-]+\.(?:run\.)?pinggy(?:-free)?\.(?:link|net)'
+
+function Wait-TunnelUrl {
+    # Адрес туннеля появляется в логе не сразу, а файл в этот момент ещё
+    # дописывается — поэтому исключение чтения не считается ошибкой.
+    param(
+        [string[]]$Paths,
+        [string]$Pattern,
+        [int]$Attempts
+    )
+    for ($i = 0; $i -lt $Attempts; $i++) {
+        Start-Sleep -Milliseconds 500
+        foreach ($path in $Paths) {
+            if (-not (Test-Path -LiteralPath $path)) { continue }
+            try {
+                $text = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop
+            } catch {
+                continue
+            }
+            # Пустой файл Get-Content -Raw возвращает как $null, а не ''.
+            if ([string]::IsNullOrEmpty($text)) { continue }
+            $match = [regex]::Match($text, $Pattern)
+            if ($match.Success) { return $match.Value }
+        }
+    }
+    return $null
+}
+
+function Stop-Cloudflared {
+    Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.ExecutablePath -eq $cloudflaredPath } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
+
+function Write-Step([string]$text) {
+    Write-Host ""
+    Write-Host "== $text" -ForegroundColor Cyan
+}
 
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  Автозапуск Староста (с обновлением URL)" -ForegroundColor Cyan
-Write-Host "========================================"
+Write-Host "  Староста: запуск" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
 
-# 1. Проверка наличия файлов
-if (-not (Test-Path $venvPython)) {
-    Write-Host "ОШИБКА: Виртуальное окружение .venv не найдено." -ForegroundColor Red
-    Read-Host "Нажмите Enter для выхода"
+# --- Проверки -------------------------------------------------------------
+if (-not (Test-Path $pythonExe)) {
+    Write-Host "ОШИБКА: не найдено окружение .venv." -ForegroundColor Red
+    Write-Host "Создайте его: python -m venv .venv"
+    Write-Host "И установите зависимости: .venv\Scripts\pip install -r requirements.txt"
+    Read-Host "Enter для выхода"
     exit 1
 }
 if (-not (Test-Path $cloudflaredPath)) {
-    Write-Host "ОШИБКА: tools\cloudflared.exe не найден." -ForegroundColor Red
-    Read-Host "Нажмите Enter для выхода"
+    Write-Host "ОШИБКА: не найден tools\cloudflared.exe." -ForegroundColor Red
+    Write-Host "Скачайте cloudflared-windows-amd64.exe и положите как tools\cloudflared.exe"
+    Read-Host "Enter для выхода"
     exit 1
 }
 
-# 2. Временный запуск cloudflared для получения URL
-Write-Host "[1/4] Запуск cloudflared для генерации HTTPS URL..." -ForegroundColor Yellow
-$job = Start-Job -ScriptBlock {
-    param($cfPath)
-    & $cfPath tunnel --url http://localhost:8000
-} -ArgumentList $cloudflaredPath
+# --- Останавливаем предыдущий запуск -------------------------------------
+Write-Step "Останавливаю предыдущий запуск (если был)"
 
-$httpsUrl = ""
-Write-Host "Ожидаем генерацию URL (до 15 сек)..." -ForegroundColor Gray
+Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.ExecutablePath -eq $cloudflaredPath } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
-# Ждем, пока в выводе не появится ссылка
-for ($i = 0; $i -lt 15; $i++) {
-    Start-Sleep -Seconds 1
-    $output = Receive-Job -Job $job
-    $urlMatch = $output | Select-String -Pattern "https://[a-zA-Z0-9\-]+\.trycloudflare\.com" | Select-Object -First 1
-    if ($urlMatch) {
-        $httpsUrl = $urlMatch.Matches.Value
-        break
+# SSH-туннель localhost.run, запущенный прошлым стартом (чужие ssh-сессии не трогаем).
+Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and ($_.CommandLine -like '*localhost.run*' -or $_.CommandLine -like '*pinggy*') } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -like '*-m bot.main*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+$listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+foreach ($listener in $listeners) {
+    $proc = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+    if ($proc -and $proc.ProcessName -like 'python*') {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
     }
 }
+Start-Sleep -Milliseconds 500
 
-# Останавливаем временную задачу
-Stop-Job $job | Out-Null
-Remove-Job $job | Out-Null
+# --- 1. Веб-сервер --------------------------------------------------------
+Write-Step "[1/4] Веб-сервер на 0.0.0.0:$port"
 
-if (-not $httpsUrl) {
-    Write-Host "Не удалось получить URL от cloudflared. Проверьте интернет." -ForegroundColor Red
-    Read-Host "Нажмите Enter для выхода"
+$serverCmd = "`"$pythonExe`" -m uvicorn app.main:app --host 0.0.0.0 --port $port"
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $serverCmd -WorkingDirectory $root
+
+$serverReady = $false
+for ($i = 0; $i -lt 40; $i++) {
+    Start-Sleep -Milliseconds 500
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$port/health" -UseBasicParsing -TimeoutSec 2
+        if ($response.StatusCode -eq 200) { $serverReady = $true; break }
+    } catch { }
+}
+if (-not $serverReady) {
+    Write-Host "ПРЕДУПРЕЖДЕНИЕ: сервер не ответил на /health за 20 секунд." -ForegroundColor Yellow
+    Write-Host "Смотрите окно 'Starosta Web' — там текст ошибки." -ForegroundColor Yellow
+}
+
+# --- 2. Туннель -----------------------------------------------------------
+Write-Step "[2/4] Туннель"
+
+$provider = $env:TUNNEL_PROVIDER
+if (-not $provider) { $provider = 'auto' }
+$tunnelUrl = $null
+$tunnelKind = ''
+
+if ($provider -ne 'ssh') {
+    Remove-Item $errLog -ErrorAction SilentlyContinue
+    $tunnelCmd = "`"$cloudflaredPath`" tunnel --url http://127.0.0.1:$port --logfile `"$errLog`" --loglevel info"
+    # Дополнительные кавычки нужны cmd.exe, иначе он срезает первую и последнюю
+    # кавычку и команда с двумя путями в кавычках ломается.
+    Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', "`"$tunnelCmd`"" -WorkingDirectory $root
+    $tunnelUrl = Wait-TunnelUrl -Paths @($errLog) -Pattern $urlPatternCloudflare -Attempts 40
+    if ($tunnelUrl) { $tunnelKind = 'cloudflare' }
+}
+
+if (-not $tunnelUrl -and $provider -eq 'cloudflare') {
+    Write-Host "ОШИБКА: cloudflared не выдал адрес, а резервный туннель отключён (TUNNEL_PROVIDER=cloudflare)." -ForegroundColor Red
+    if (Test-Path $errLog) { Get-Content $errLog -Tail 15 -Encoding UTF8 }
+    Read-Host "Enter для выхода"
     exit 1
 }
 
-Write-Host "Успешно получен URL: $httpsUrl" -ForegroundColor Green
+if (-not $tunnelUrl) {
+    Write-Host "  cloudflared не получил адрес." -ForegroundColor Yellow
+    if (Test-Path $errLog) {
+        $tail = Get-Content -LiteralPath $errLog -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        if ($tail -match 'certificate|failed to request quick Tunnel') {
+            Write-Host "  Причина: DNS/прокси провайдера. Мобильные операторы подменяют" -ForegroundColor Yellow
+            Write-Host "  *.trycloudflare.com на свой сервер, и TLS-сертификат не сходится." -ForegroundColor Yellow
+        }
+    }
+    Stop-Cloudflared
 
-# 3. Автоматическое обновление файла .env
-Write-Host "[2/4] Обновление файла .env..." -ForegroundColor Yellow
-$envContent = Get-Content $envPath -Raw
-# Заменяем строку WEB_BASE_URL=... на новую
-$newEnvContent = $envContent -replace '(?m)^WEB_BASE_URL=.*$', "WEB_BASE_URL=$httpsUrl"
+    if (-not (Test-Path $sshExe)) {
+        Write-Host "ОШИБКА: не найден встроенный SSH-клиент Windows ($sshExe)." -ForegroundColor Red
+        Write-Host "Включите компонент Windows «Клиент OpenSSH» либо запустите туннель" -ForegroundColor Red
+        Write-Host "через другую сеть." -ForegroundColor Red
+        Read-Host "Enter для выхода"
+        exit 1
+    }
 
-if ($newEnvContent -ne $envContent) {
-    # Сохраняем с той же кодировкой, что и оригинал (обычно UTF8 без BOM или UTF8)
-    [System.IO.File]::WriteAllText($envPath, $newEnvContent, [System.Text.Encoding]::UTF8)
-    Write-Host "Файл .env успешно обновлен." -ForegroundColor Green
-} else {
-    Write-Host "WEB_BASE_URL уже был равен актуальному URL." -ForegroundColor Gray
+    Write-Host "  Переключаюсь на SSH-туннель localhost.run (без регистрации)." -ForegroundColor Cyan
+    Remove-Item $sshLog, $sshErrLog -ErrorAction SilentlyContinue
+    # -T: без псевдотерминала, иначе localhost.run рисует QR-код и адрес
+    # теряется в ANSI-последовательностях.
+    $sshArguments = @(
+        '-T',
+        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', "UserKnownHostsFile=$knownHosts",
+        '-o', 'ServerAliveInterval=20',
+        '-o', 'ServerAliveCountMax=3',
+        '-o', 'ExitOnForwardFailure=yes',
+        '-R', "80:127.0.0.1:$port",
+        'nokey@localhost.run'
+    )
+    Start-Process -FilePath $sshExe -ArgumentList $sshArguments `
+        -RedirectStandardOutput $sshLog -RedirectStandardError $sshErrLog `
+        -WindowStyle Hidden -WorkingDirectory $root
+    $tunnelUrl = Wait-TunnelUrl -Paths @($sshLog, $sshErrLog) -Pattern $urlPatternSsh -Attempts 60
+    if ($tunnelUrl) { $tunnelKind = 'ssh' }
 }
 
-# 4. Запуск основных сервисов в отдельных окнах
-Write-Host "[3/4] Запуск веб-сервера (Uvicorn)..." -ForegroundColor Yellow
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$projectRoot'; & '$venvPython' -m uvicorn app.main:app --host 0.0.0.0 --port 8000" -WindowStyle Normal
+if (-not $tunnelUrl) {
+    Write-Host "ОШИБКА: туннель не выдал адрес." -ForegroundColor Red
+    foreach ($path in @($errLog, $sshLog, $sshErrLog)) {
+        if (Test-Path -LiteralPath $path) {
+            Write-Host "Последние строки $path" -ForegroundColor Yellow
+            Get-Content -LiteralPath $path -Tail 10 -Encoding UTF8
+        }
+    }
+    Read-Host "Enter для выхода"
+    exit 1
+}
 
-Start-Sleep -Seconds 2
+Write-Host "  $tunnelUrl" -ForegroundColor Green
+if ($tunnelKind -eq 'ssh') {
+    Write-Host "  (SSH-туннель localhost.run; работает, пока запущен ssh.exe)" -ForegroundColor DarkGray
+} else {
+    Write-Host "  (при каждом запуске адрес новый)" -ForegroundColor DarkGray
+}
 
-Write-Host "[4/4] Запуск Cloudflare туннеля и Бота..." -ForegroundColor Yellow
-# Запускаем cloudflared в отдельном окне, чтобы он работал постоянно
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$projectRoot'; & '$cloudflaredPath' tunnel --url http://localhost:8000" -WindowStyle Normal
+# --- 3. Обновляем .env ----------------------------------------------------
+Write-Step "[3/4] Обновляю WEB_BASE_URL в .env"
 
-Start-Sleep -Seconds 2
+$envText = [System.IO.File]::ReadAllText($envPath, [System.Text.Encoding]::UTF8)
+if ($envText -match '(?m)^\s*WEB_BASE_URL\s*=') {
+    $newEnvText = [regex]::Replace($envText, '(?m)^\s*WEB_BASE_URL\s*=.*$', "WEB_BASE_URL=$tunnelUrl")
+} else {
+    $newEnvText = $envText.TrimEnd() + "`r`nWEB_BASE_URL=$tunnelUrl`r`n"
+}
+# UTF-8 без BOM: pydantic-settings читает такой файл без сюрпризов.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($envPath, $newEnvText, $utf8NoBom)
+Write-Host "  .env обновлён." -ForegroundColor Green
 
-# Запускаем бота (он прочитает обновленный .env)
-Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$projectRoot'; & '$venvPython' -m bot.main" -WindowStyle Normal
+# --- 4. Бот ---------------------------------------------------------------
+Write-Step "[4/4] Бот"
 
-Write-Host "========================================" -ForegroundColor Green
-Write-Host "ВСЁ ЗАПУЩЕНО!" -ForegroundColor Green
-Write-Host "URL в .env установлен в: $httpsUrl" -ForegroundColor Cyan
+$botCmd = "`"$pythonExe`" -m bot.main"
+Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $botCmd -WorkingDirectory $root
+
+# --- Итог -----------------------------------------------------------------
+$lanIp = (& $pythonExe -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8', 80)); print(s.getsockname()[0])") 2>$null
+if (-not $lanIp) { $lanIp = '127.0.0.1' }
+
 Write-Host ""
-Write-Host "ВАЖНО: Если URL изменился, не забудьте обновить его в @BotFather:" -ForegroundColor Yellow
-Write-Host "  1. Напишите /setmenubutton" -ForegroundColor Yellow
-Write-Host "  2. Выберите бота" -ForegroundColor Yellow
-Write-Host "  3. Вставьте эту ссылку: $httpsUrl" -ForegroundColor Yellow
-Write-Host "========================================"
-Write-Host "Это окно можно закрыть. Сервисы продолжат работать в своих окнах."
-Read-Host "Нажмите Enter для выхода"
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  Запущено" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  Mini App / интернет: $tunnelUrl"
+Write-Host "  С телефона в Wi-Fi:  http://${lanIp}:$port"
+Write-Host "  С этого ПК:          http://127.0.0.1:$port"
+Write-Host ""
+Write-Host "  Открыты окна: сервер и бот." -ForegroundColor DarkGray
+if ($tunnelKind -eq 'ssh') {
+    Write-Host "  Туннель работает в фоне (ssh.exe); следующий запуск его перезапустит." -ForegroundColor DarkGray
+    Write-Host "  Лог туннеля: $sshLog" -ForegroundColor DarkGray
+} else {
+    Write-Host "  Остановить: закройте окно туннеля (и остальные)." -ForegroundColor DarkGray
+    Write-Host "  Лог туннеля: $errLog" -ForegroundColor DarkGray
+}
+Write-Host ""
+Read-Host "Enter для закрытия этого окна"

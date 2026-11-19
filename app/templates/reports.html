@@ -38,7 +38,8 @@
       <span class="chip">Заявления: {{ report.statements|length }}</span>
       <span class="chip">Распоряжения: {{ report.orders|length }}</span>
     </div>
-    <a class="btn btn-primary" href="{{ url_with('/reports/propuski.docx', group=ctx.group.id, month=month_value) }}">
+    <a class="btn btn-primary" data-external
+       href="{{ url_with('/reports/propuski.docx', group=ctx.group.id, month=month_value, token=propuski_token) }}">
       Скачать .docx
     </a>
   </article>
@@ -48,7 +49,7 @@
       <span class="badge type">Отработки</span>
       <span class="muted small">{{ settings.paid_lesson_rate|string|replace('.', ',') }} BYN за пару</span>
     </div>
-    <h2 class="card-title">Ведомость платных отработок</h2>
+    <h2 class="card-title">Ведомость учета платных отработок по дисциплине</h2>
     <p class="muted small">
       Отдельная таблица на каждый предмет и преподавателя: дата пропуска,
       сумма к оплате, номер операции в ЕРИП, дата оплаты и подпись.
@@ -70,7 +71,8 @@
     {% else %}
       <p class="muted small">Неуважительных пропусков за месяц нет.</p>
     {% endif %}
-    <a class="btn btn-primary" href="{{ url_with('/reports/paid.docx', group=ctx.group.id, month=month_value) }}">
+    <a class="btn btn-primary" data-external
+       href="{{ url_with('/reports/paid.docx', group=ctx.group.id, month=month_value, token=paid_token) }}">
       Скачать .docx
     </a>
   </article>

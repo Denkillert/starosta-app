@@ -67,13 +67,20 @@ def terms_for_date(db: Session, group: Group, day: date) -> int:
         if snapshot.term in seen:
             continue
         seen.add(snapshot.term)
+        weeks: list[dict] = []
         for week in (snapshot.payload or {}).get("weeks", []):
             try:
-                start = date.fromisoformat(week["start"])
-                end = date.fromisoformat(week["end"])
+                weeks.append(
+                    {
+                        "start": date.fromisoformat(week["start"]),
+                        "end": date.fromisoformat(week["end"]),
+                    }
+                )
             except (KeyError, ValueError):
                 continue
-            if start <= day <= end:
+        semester_start = _weeks_semester_start(weeks)
+        for week in weeks:
+            if _week_contains(week, day, semester_start):
                 return snapshot.term
     return group.current_term
 
@@ -110,8 +117,22 @@ def list_weeks(db: Session, group_id: int, term: int) -> list[dict]:
     return weeks
 
 
+def _weeks_semester_start(weeks: list[dict]) -> date | None:
+    return min((week["start"] for week in weeks), default=None)
+
+
+def _week_contains(week: dict, day: date, semester_start: date | None) -> bool:
+    # Сайт ПолесГУ нумерует недели со вторника по воскресенье, поэтому
+    # понедельник относится к той же неделе, что и её вторник. Исключение —
+    # понедельник до начала семестра: он не должен попадать в первую неделю.
+    if week["start"] <= day <= week["end"]:
+        return True
+    return bool(semester_start and semester_start <= day < week["start"])
+
+
 def week_for_date(weeks: list[dict], day: date) -> dict | None:
+    semester_start = _weeks_semester_start(weeks)
     for week in weeks:
-        if week["start"] <= day <= week["end"]:
+        if _week_contains(week, day, semester_start):
             return week
     return None

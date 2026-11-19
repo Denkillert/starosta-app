@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ code }} · Староста</title>
   <link rel="stylesheet" href="/static/style.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <main class="container error-page">
@@ -13,5 +14,34 @@
     <p class="muted">{{ message }}</p>
     <a class="btn btn-primary" href="/">На главную</a>
   </main>
+  <script>
+    // Mini App через туннель сначала попадает сюда без cookie-сессии:
+    // меняем initData на cookie и перезагружаем страницу.
+    (function () {
+      var tg = window.Telegram && window.Telegram.WebApp;
+      if (!tg || !tg.initData) return;
+      if (document.cookie.indexOf("starosta_auth=1") !== -1) return;
+      if (window.sessionStorage && sessionStorage.getItem("starosta_auth_tried")) return;
+      if (window.sessionStorage) sessionStorage.setItem("starosta_auth_tried", "1");
+      try { tg.ready(); tg.expand(); } catch (e) { /* старые клиенты */ }
+      fetch("/auth/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ init_data: tg.initData }),
+        credentials: "same-origin"
+      })
+        .then(function (response) {
+          if (!response.ok) {
+            if (window.sessionStorage) sessionStorage.removeItem("starosta_auth_tried");
+            return;
+          }
+          window.location.reload();
+        })
+        .catch(function () {
+          // Повторим попытку при следующем открытии страницы.
+          if (window.sessionStorage) sessionStorage.removeItem("starosta_auth_tried");
+        });
+    })();
+  </script>
 </body>
 </html>

@@ -50,13 +50,45 @@ class DocumentError(ValueError):
 
 
 def next_number(db: Session, group_id: int, type_: str) -> str:
-    count = db.scalar(
-        select(func.count(Document.id)).where(
-            Document.group_id == group_id, Document.type == type_
-        )
-    )
+    """Следующий номер в рамках года и типа документа.
+
+    Раньше номер считался по количеству документов: после удаления одного из
+    них новый документ получал уже занятый номер.
+    """
+    year = now_local().year
     prefix = PREFIXES.get(type_, "ДОК")
-    return f"{prefix}-{now_local().year}-{int(count or 0) + 1:03d}"
+    existing = db.scalars(
+        select(Document.number).where(
+            Document.group_id == group_id,
+            Document.type == type_,
+            Document.number.like(f"{prefix}-{year}-%"),
+        )
+    ).all()
+    last = 0
+    for value in existing:
+        tail = str(value or "").rsplit("-", 1)[-1]
+        if tail.isdigit():
+            last = max(last, int(tail))
+    return f"{prefix}-{year}-{last + 1:03d}"
+
+
+def _ensure_unique_number(
+    db: Session,
+    *,
+    group_id: int,
+    type_: str,
+    number: str,
+    exclude_id: int | None = None,
+) -> None:
+    stmt = select(Document.id).where(
+        Document.group_id == group_id,
+        Document.type == type_,
+        Document.number == number,
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Document.id != exclude_id)
+    if db.scalar(stmt):
+        raise DocumentError(f"Документ с номером «{number}» уже существует")
 
 
 def create_document(
@@ -100,6 +132,8 @@ def create_document(
 
     if not students:
         raise DocumentError("Выберите хотя бы одного студента")
+    if type_ in (DocType.ORDER, DocType.CERTIFICATE) and valid_from is None:
+        raise DocumentError("Укажите дату начала периода освобождения")
     if valid_from and valid_to and valid_from > valid_to:
         raise DocumentError("Дата начала позже даты окончания")
     if (
@@ -120,18 +154,22 @@ def create_document(
     if final_status not in DocStatus.ALL:
         raise DocumentError("Неизвестный статус документа")
 
-    final_title = (
-        (title or "").strip()
-        if type_ == DocType.STATEMENT and (title or "").strip()
-        else DEFAULT_TITLES.get(type_, "Документ")
+    # Пользовательское название сохраняется для любого типа документа,
+    # а не только для заявления (раньше «Справка по болезни» превращалась
+    # в безликое «Справка»).
+    final_title = (title or "").strip() or DEFAULT_TITLES.get(type_, "Документ")
+
+    number_value = number_value or next_number(db, group.id, type_)
+    _ensure_unique_number(
+        db, group_id=group.id, type_=type_, number=number_value
     )
 
     document = Document(
         group_id=group.id,
         type=type_,
         status=final_status,
-        title=final_title or DEFAULT_TITLES.get(type_, "Документ"),
-        number=number_value or next_number(db, group.id, type_),
+        title=final_title,
+        number=number_value,
         student_id=students[0].id if students else None,
         author_id=author.id if author else None,
         issued_at=issued_at or now_local().date(),
@@ -193,6 +231,14 @@ def update_document(
     if unknown:
         raise DocumentError(f"Нельзя изменить поля: {', '.join(sorted(unknown))}")
 
+    if "title" in fields:
+        fields["title"] = (
+            str(fields["title"] or "").strip()
+            or DEFAULT_TITLES.get(document.type, "Документ")
+        )
+    if fields.get("number") is not None:
+        fields["number"] = str(fields["number"]).strip() or None
+
     touches_excuses = bool(
         {
             "student_id",
@@ -206,9 +252,10 @@ def update_document(
         }
         & set(fields)
     )
-    if touches_excuses:
-        revert_document(db, document)
 
+    # Сначала проверяем новые значения и только потом снимаем старые «У»:
+    # иначе отклонённое редактирование оставляло журнал изменённым.
+    students: list[Membership] | None = None
     if "student_ids" in fields:
         ids = list(dict.fromkeys(fields.pop("student_ids") or []))
         students = list(
@@ -221,20 +268,55 @@ def update_document(
         ) if ids else []
         if ids and len(students) != len(ids):
             raise DocumentError("Студент не найден в этой группе")
+        if not students:
+            raise DocumentError("Выберите хотя бы одного студента")
+
+    new_student_id = fields.get("student_id")
+    if new_student_id:
+        student = db.get(Membership, new_student_id)
+        if student is None or student.group_id != document.group_id:
+            raise DocumentError("Студент не найден в этой группе")
+
+    new_valid_from = fields.get("valid_from", document.valid_from)
+    new_valid_to = fields.get("valid_to", document.valid_to)
+    if new_valid_from and new_valid_to and new_valid_from > new_valid_to:
+        raise DocumentError("Дата начала позже даты окончания")
+
+    new_from_time = fields.get("valid_from_time", document.valid_from_time)
+    new_to_time = fields.get("valid_to_time", document.valid_to_time)
+    if (
+        new_valid_from
+        and new_valid_to
+        and new_valid_from == new_valid_to
+        and new_from_time
+        and new_to_time
+        and new_from_time > new_to_time
+    ):
+        raise DocumentError("Время начала позже времени окончания")
+
+    new_status = fields.get("status", document.status)
+    if new_status not in DocStatus.ALL:
+        raise DocumentError("Неизвестный статус документа")
+
+    new_number = fields.get("number")
+    if new_number:
+        _ensure_unique_number(
+            db,
+            group_id=document.group_id,
+            type_=document.type,
+            number=str(new_number).strip(),
+            exclude_id=document.id,
+        )
+
+    if touches_excuses:
+        revert_document(db, document)
+
+    if students is not None:
         document.students = students
         document.student_id = students[0].id if students else None
 
     for key, value in fields.items():
-        if key == "student_id" and value:
-            student = db.get(Membership, value)
-            if student is None or student.group_id != document.group_id:
-                raise DocumentError("Студент не найден в этой группе")
         setattr(document, key, value)
-
-    if document.valid_from and document.valid_to and document.valid_from > document.valid_to:
-        raise DocumentError("Дата начала позже даты окончания")
-    if document.status not in DocStatus.ALL:
-        raise DocumentError("Неизвестный статус документа")
 
     if touches_excuses:
         apply_document(db, document)
@@ -275,10 +357,11 @@ def set_status(
     if comment:
         document.meta = {**(document.meta or {}), "last_comment": comment}
 
-    if status in (DocStatus.REVOKED, DocStatus.ARCHIVED, DocStatus.REJECTED):
-        revert_document(db, document)
-    elif status in (DocStatus.ACTIVE, DocStatus.APPROVED):
-        apply_document(db, document)
+    if status != previous:
+        if status in (DocStatus.REVOKED, DocStatus.ARCHIVED, DocStatus.REJECTED):
+            revert_document(db, document)
+        elif status in (DocStatus.ACTIVE, DocStatus.APPROVED):
+            apply_document(db, document)
 
     audit.log(
         db,

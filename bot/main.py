@@ -21,6 +21,8 @@ from aiogram.types import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    MenuButtonDefault,
+    MenuButtonWebApp,
     Message,
     WebAppInfo,
 )
@@ -363,11 +365,9 @@ async def cmd_app(message: Message) -> None:
             "<b>Mini App выключен.</b>\n\n"
             f"Текущий адрес: <code>{settings.web_url}</code>\n\n"
             "Telegram открывает WebApp только по HTTPS. Чтобы включить:\n"
-            "1. Запусти cloudflared: <code>tools\\cloudflared.exe tunnel --url http://localhost:8000</code>\n"
-            "2. Скопируй https://...trycloudflare.com из окна туннеля\n"
-            "3. Впиши его в <code>.env</code>: <code>WEB_BASE_URL=https://...</code>\n"
-            "4. Перезапусти бота\n"
-            "5. В @BotFather: <code>/setmenubutton</code> → вставь этот же URL",
+            "1. Закрой бота и запусти <code>start.bat</code> — он поднимет туннель\n"
+            "   и сам впишет адрес в <code>.env</code>\n"
+            "2. Перезапусти бота — кнопку меню он обновит сам",
             reply_markup=keyboard,
         )
 
@@ -494,7 +494,9 @@ async def fallback(message: Message) -> None:
         )
         if ok:
             await message.answer(answer, reply_markup=_app_keyboard())
-            return
+        else:
+            await message.answer(answer)
+        return
     await message.answer(
         "Не понял команду. Список: /help\n"
         "Или откройте приложение кнопкой из /start."
@@ -545,12 +547,28 @@ async def main() -> None:
                 "Нажмите «Открыть приложение» или отправьте /start."
             )
         )
+        # Кнопка меню слева от поля ввода. Обновляется при каждом запуске,
+        # поэтому при смене адреса туннеля не нужно заходить в @BotFather.
+        if settings.web_app_enabled:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="Приложение",
+                    web_app=WebAppInfo(url=settings.web_url),
+                )
+            )
+        else:
+            # Если туннель отключён, кнопка меню не должна вести на мёртвый
+            # HTTPS-адрес от прошлого запуска.
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
     except TelegramAPIError as exc:
         print(f"Не удалось обновить профиль бота: {exc}")
 
-    print(f"Бот запущен. Остановить: Ctrl+C")
+    print("Бот запущен. Остановить: Ctrl+C")
     print(settings.mini_app_status)
-    await dispatcher.start_polling(bot)
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":

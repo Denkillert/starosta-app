@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from ..models import (
 )
 from . import audit
 from .polessu import (
+    ParsedLesson,
     ParsedSchedule,
     ScheduleFetchError,
     ScheduleParseError,
@@ -132,7 +133,7 @@ def import_parsed(
         term=term,
         source_url=parsed.source_url,
         content_hash=parsed.content_hash,
-        lessons_count=parsed.lesson_count,
+        lessons_count=result.lessons,
         weeks_count=parsed.week_count,
         status="ok",
         payload={**parsed.to_payload(), "content_hash": parsed.content_hash},
@@ -152,7 +153,7 @@ def import_parsed(
         entity_id=group.id,
         payload={
             "term": term,
-            "lessons": parsed.lesson_count,
+            "lessons": result.lessons,
             "weeks": parsed.week_count,
             "occurrences_created": result.occurrences_created,
             "occurrences_cancelled": result.occurrences_cancelled,
@@ -164,22 +165,45 @@ def import_parsed(
     db.commit()
 
     result.message = (
-        f"Импортировано {parsed.lesson_count} строк расписания "
+        f"Импортировано {result.lessons} строк расписания "
         f"на {parsed.week_count} недель."
     )
     return result
 
 
+def _merge_parsed_lessons(parsed: ParsedSchedule) -> list[ParsedLesson]:
+    """Склеивает строки с одинаковым source_key.
+
+    На сайте одна и та же пара может быть разбита на несколько строк, которые
+    отличаются только номерами недель. source_key недели не учитывает, поэтому
+    без склейки последняя строка затирала недели предыдущих.
+    """
+    merged: dict[str, ParsedLesson] = {}
+    order: list[str] = []
+    for item in parsed.lessons:
+        current = merged.get(item.source_key)
+        if current is None:
+            merged[item.source_key] = replace(
+                item, weeks=list(item.weeks), dates=list(item.dates)
+            )
+            order.append(item.source_key)
+        else:
+            current.weeks = sorted(set(current.weeks) | set(item.weeks))
+            current.dates = sorted(set(current.dates) | set(item.dates))
+    return [merged[key] for key in order]
+
+
 def _apply_schedule(
     db: Session, group: Group, term: int, parsed: ParsedSchedule
 ) -> SyncResult:
+    lessons = _merge_parsed_lessons(parsed)
     result = SyncResult(
         status="ok",
         changed=False,
         message="",
         group_id=group.id,
         term=term,
-        lessons=parsed.lesson_count,
+        lessons=len(lessons),
         weeks=parsed.week_count,
     )
 
@@ -194,7 +218,7 @@ def _apply_schedule(
     seen_keys: set[str] = set()
     lesson_by_key: dict[str, Lesson] = {}
 
-    for item in parsed.lessons:
+    for item in lessons:
         subject = subjects.get(item.subject)
         if subject is None:
             subject = Subject(name=item.subject)
@@ -252,7 +276,7 @@ def _apply_schedule(
             existing_occurrences[(occurrence.lesson_id, occurrence.date)] = occurrence
 
     desired: set[tuple[int, object]] = set()
-    for item in parsed.lessons:
+    for item in lessons:
         lesson = lesson_by_key[item.source_key]
         for day in item.dates:
             desired.add((lesson.id, day))

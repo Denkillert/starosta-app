@@ -2,12 +2,25 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from app.config import settings
+from app.security import sign_file_token
+
 
 def test_dashboard_renders(api_client):
     response = api_client.get("/")
     assert response.status_code == 200, response.text
     assert "Староста" in response.text
     assert "Пары сегодня" in response.text
+
+
+def test_proxied_request_requires_telegram_auth(api_client):
+    # Через туннель dev-режим не должен пускать кого угодно под старостой.
+    response = api_client.get("/", headers={"cf-connecting-ip": "203.0.113.10"})
+    assert response.status_code == 401, response.text
+    assert "Telegram" in response.text
+    # Страница ошибки должна сама обменять initData на сессию — иначе Mini App
+    # через туннель упрётся в 401 и не загрузится.
+    assert "/auth/telegram" in response.text
 
 
 def test_schedule_page(api_client):
@@ -45,9 +58,6 @@ def test_web_attendance_form(api_client, seeded):
     page = api_client.get("/journal", params={"date": seeded["first_date"]})
     assert page.status_code == 200
 
-
-    from app.db import SessionLocal  # noqa: F401  (не используется, но проверяет импорт)
-
     # Берём пару через API, чтобы не зависеть от порядка отрисовки.
     schedule = api_client.get(
         f"/api/groups/{seeded['group_id']}/schedule",
@@ -73,9 +83,72 @@ def test_reports_page_has_month_vedomosti(api_client):
     response = api_client.get("/reports")
     assert response.status_code == 200, response.text
     assert "Ведомость учета учебных часов" in response.text
-    assert "Ведомость платных отработок" in response.text
+    assert "Ведомость учета платных отработок" in response.text
     assert "/reports/propuski.docx" in response.text
     assert "/reports/paid.docx" in response.text
+    assert "token=" in response.text
+
+
+def test_reports_docx_opens_with_token_without_cookie(client, seeded, monkeypatch):
+    # Mini App открывает файл в системном браузере, где cookie нет.
+    monkeypatch.setattr(settings, "dev_mode", False)
+    token = sign_file_token(user_id=seeded["user_id"], group_id=seeded["group_id"])
+
+    for name in ("propuski", "paid"):
+        response = client.get(
+            f"/reports/{name}.docx",
+            params={"group": seeded["group_id"], "token": token},
+        )
+        assert response.status_code == 200, response.text
+        assert response.content[:2] == b"PK"
+
+
+def test_reports_docx_rejects_broken_token(client, seeded, monkeypatch):
+    monkeypatch.setattr(settings, "dev_mode", False)
+
+    response = client.get(
+        "/reports/propuski.docx",
+        params={"group": seeded["group_id"], "token": "1.1.9999999999.bad"},
+    )
+    assert response.status_code == 401
+
+
+def test_staff_can_rename_student(api_client, seeded):
+    member_id = seeded["members"][0]
+    response = api_client.post(
+        f"/actions/students/{member_id}/update",
+        data={
+            "group": seeded["group_id"],
+            "full_name": "Иванова Анна Петровна",
+            "role": "student",
+            "status": "active",
+            "funding": "budget",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    page = api_client.get("/students")
+    assert "Иванова Анна Петровна" in page.text
+
+
+def test_rename_rejects_duplicate_name(api_client, seeded):
+    first, second = seeded["members"][0], seeded["members"][1]
+    response = api_client.post(
+        f"/actions/students/{second}/update",
+        data={
+            "group": seeded["group_id"],
+            "full_name": "Иванова Анна Сергеевна",
+            "role": "student",
+            "status": "active",
+            "funding": "budget",
+        },
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "err" in response.headers["location"]
+    page = api_client.get("/students")
+    assert "уже есть в группе" not in page.text  # ошибка показывается один раз
+    assert first != second
 
 
 def test_reports_docx_download(api_client):

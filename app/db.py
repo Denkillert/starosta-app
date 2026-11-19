@@ -44,7 +44,11 @@ def get_db() -> Generator[Session, None, None]:
 # Простые добавления колонок для уже существующих баз: Alembic в проекте нет,
 # а `create_all` не меняет готовые таблицы. Для новых баз этот шаг пустой.
 _COMPAT_COLUMNS: dict[str, tuple[tuple[str, str], ...]] = {
-    "memberships": (("funding", "VARCHAR(16) NOT NULL DEFAULT 'budget'"),),
+    "memberships": (
+        ("funding", "VARCHAR(16) NOT NULL DEFAULT 'budget'"),
+        ("subgroup", "INTEGER NULL"),
+        ("needs_review", "BOOLEAN NOT NULL DEFAULT 0"),
+    ),
     "documents": (
         ("valid_from_time", "TIME NULL"),
         ("valid_to_time", "TIME NULL"),

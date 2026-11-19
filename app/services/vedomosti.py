@@ -167,12 +167,12 @@ def _document_lines(document: Document) -> list[DocumentLine]:
     students = _document_students(document)
     if not students:
         return []
-    
+
     if document.type == DocType.STATEMENT:
         period = format_date_short(document.issued_at)
     else:
         period = _document_period(document)
-        
+
     number = document.number if document.type == DocType.ORDER else None
     return [
         DocumentLine(
@@ -187,7 +187,7 @@ def _document_lines(document: Document) -> list[DocumentLine]:
 def propuski_report(db: Session, group: Group, year: int, month: int) -> PropuskiReport:
     first, last = _month_bounds(year, month)
     matrix = attendance_service.month_matrix(db, group.id, year, month)
-    
+
     report = PropuskiReport(
         group=group,
         year=year,
@@ -230,7 +230,7 @@ def propuski_report(db: Session, group: Group, year: int, month: int) -> Propusk
             continue
         if not _overlaps(document, first, last):
             continue
-        
+
         lines = _document_lines(document)
         if document.type == DocType.CERTIFICATE:
             report.certificates.extend(lines)
@@ -261,7 +261,7 @@ def paid_report(db: Session, group: Group, year: int, month: int) -> PaidReport:
         if bucket is None:
             bucket = PaidGroup(subject=entry.subject, teacher=entry.teacher or "—")
             grouped[key] = bucket
-        
+
         amount = rate * (entry.hours / lessons)
         bucket.entries.append(
             PaidRow(
@@ -296,7 +296,7 @@ def _new_document(*, landscape: bool, base_size: int = 9) -> DocxDocument:
         section.right_margin = Cm(1)
         section.top_margin = Cm(1)
         section.bottom_margin = Cm(1)
-        
+
     style = document.styles["Normal"]
     style.font.name = "Times New Roman"
     style.font.size = Pt(base_size)
@@ -377,13 +377,13 @@ def _documents_table(document, report: PropuskiReport) -> None:
     _merged_header(table, 0, 0, 1, "Справки")
     _merged_header(table, 0, 2, 3, "Заявления")
     _merged_header(table, 0, 4, 5, "Распоряжения")
-    
+
     headers = ("Ф.И.О.", "Дата", "Ф.И.О.", "Дата", "Ф.И.О.", "Номер и дата")
     for index, label in enumerate(headers):
         _cell(table.cell(1, index), label, bold=True, size=8)
 
     rows_count = max(1, len(report.certificates), len(report.statements), len(report.orders))
-    
+
     for index in range(rows_count):
         cells = table.add_row().cells
         blocks = (
@@ -394,7 +394,7 @@ def _documents_table(document, report: PropuskiReport) -> None:
         for lines, column in blocks:
             line = lines[index] if index < len(lines) else None
             _cell(cells[column], line.student if line else "", size=8, align=WD_ALIGN_PARAGRAPH.LEFT)
-            
+
             if line is None:
                 value = ""
             elif column == 4:
@@ -420,7 +420,7 @@ def _paid_work_table(document, report: PropuskiReport) -> None:
         space_before=12,
         space_after=6,
     )
-    
+
     table = _table(document, rows=1, cols=3)
     headers = ("Ф.И.О. студента", "Дисциплина", "Количество часов отработки")
     for index, label in enumerate(headers):
@@ -459,7 +459,7 @@ def render_propuski(report: PropuskiReport) -> bytes:
     _title(document, "ВЕДОМОСТЬ", size=14)
     _subtitle(document, "учета учебных часов, пропущенных студентами", size=11)
     _subtitle(document, f"за {report.month_name.lower()} месяц {report.year} г.", size=11)
-    
+
     course = str(report.course) if report.course else "_______"
     _subtitle(document, f"Курс {course} ГРУППА {report.group.code}", size=11)
     _paragraph(document, "", size=8)
@@ -467,7 +467,7 @@ def render_propuski(report: PropuskiReport) -> bytes:
     days = report.days
     cols = 3 + days + 3
     table = _table(document, rows=2, cols=cols)
-    
+
     fixed = ("№ п/п", "Дата ФИО", "форма обучения\n(бюджет/платно)")
     for index, label in enumerate(fixed):
         merged = table.cell(0, index).merge(table.cell(1, index))
@@ -492,11 +492,11 @@ def render_propuski(report: PropuskiReport) -> bytes:
         _cell(row[0], number, size=8)
         _cell(row[1], short_name(item.member.full_name), size=8, align=WD_ALIGN_PARAGRAPH.LEFT)
         _cell(row[2], funding_short.get(item.member.funding, "Б"), size=8)
-        
+
         for day in range(1, days + 1):
             hours = item.days.get(day)
             _cell(row[2 + day], hours or "", size=7)
-            
+
         _cell(row[total_col], item.total_hours or "", size=8)
         _cell(row[total_col + 1], item.excused_hours or "", size=8)
         _cell(row[total_col + 2], item.absent_hours or "", size=8)
@@ -515,7 +515,7 @@ def render_propuski(report: PropuskiReport) -> bytes:
     for day in range(1, days + 1):
         hours = sum(item.days.get(day, 0) for item in report.students)
         _cell(totals_row[2 + day], hours or "", bold=True, size=7)
-        
+
     _cell(totals_row[total_col], report.total_hours or "", bold=True, size=8)
     _cell(totals_row[total_col + 1], report.excused_hours or "", bold=True, size=8)
     _cell(totals_row[total_col + 2], report.absent_hours or "", bold=True, size=8)
@@ -531,7 +531,7 @@ def render_propuski(report: PropuskiReport) -> bytes:
 
 def render_paid(report: PaidReport) -> bytes:
     document = _new_document(landscape=False, base_size=9)
-    
+
     if not report.groups:
         _title(document, "Ведомость учета платных отработок по дисциплине")
         _subtitle(document, f"за {report.month_name} {report.year} г. группы {report.group.code}")
@@ -551,7 +551,7 @@ def render_paid(report: PaidReport) -> bytes:
     for index, group in enumerate(report.groups):
         if index:
             document.add_page_break()
-            
+
         _title(document, "Ведомость учета платных отработок по дисциплине")
         _subtitle(document, group.subject, size=12, bold=True)
         _caption(document, "название дисциплины")

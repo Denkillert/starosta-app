@@ -88,6 +88,10 @@
             <summary class="link small">Изменить</summary>
             <form method="post" action="/actions/students/{{ member.id }}/update" class="stack">
               <input type="hidden" name="group" value="{{ ctx.group.id }}">
+              <label class="field">
+                <span>ФИО</span>
+                <input name="full_name" value="{{ member.full_name }}" required maxlength="160" autocomplete="off">
+              </label>
               <div class="form-row">
                 <label class="field">
                   <span>Роль</span>
@@ -124,6 +128,24 @@
     {% endfor %}
   </div>
 </section>
+
+{% if ctx.is_staff %}
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">База данных группы</h2>
+      <span class="muted small">SQLite</span>
+    </div>
+    <p class="muted small">
+      Отдельный файл только с данными {{ ctx.group.code }}: студенты, пары,
+      посещаемость, документы и журнал действий. Чужих групп в нём нет.
+      Файл пересобирается при каждом скачивании.
+    </p>
+    <a class="btn btn-ghost" data-external
+       href="{{ url_with('/groups/' ~ ctx.group.id ~ '/database.db', group=ctx.group.id, token=db_token) }}">
+      Скачать базу группы (.db)
+    </a>
+  </section>
+{% endif %}
 
 <p class="muted small center">
   Посещаемость считается за текущий месяц. «Уважительная» не портит процент.

@@ -374,20 +374,19 @@ def subject_summary(
     if not members_count:
         return []
 
-    occurrences = dict(
-        db.execute(
-            select(Lesson.subject_id, func.count(LessonOccurrence.id))
-            .select_from(LessonOccurrence)
-            .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
-            .where(
-                LessonOccurrence.group_id == group_id,
-                LessonOccurrence.date >= date_from,
-                LessonOccurrence.date <= date_to,
-                LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
-            )
-            .group_by(Lesson.subject_id)
-        ).all()
-    )
+    occurrences = db.execute(
+        select(Lesson.subject_id, Subject.name, func.count(LessonOccurrence.id))
+        .select_from(LessonOccurrence)
+        .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
+        .join(Subject, Lesson.subject_id == Subject.id)
+        .where(
+            LessonOccurrence.group_id == group_id,
+            LessonOccurrence.date >= date_from,
+            LessonOccurrence.date <= date_to,
+            LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
+        )
+        .group_by(Lesson.subject_id, Subject.name)
+    ).all()
 
     rows = db.execute(
         select(
@@ -423,10 +422,10 @@ def subject_summary(
     }
 
     result = []
-    for subject_id, count in occurrences.items():
-        data = stats_by_subject.get(subject_id)
-        if data is None:
-            continue
+    for subject_id, name, count in occurrences:
+        # Предмет без единого пропуска тоже должен попасть в отчёт: раньше
+        # он исчезал, потому что строки Attendance для него не было.
+        data = stats_by_subject.get(subject_id, {"absent": 0, "excused": 0})
         total = int(count) * members_count
         absent = data["absent"]
         excused = data["excused"]
@@ -435,7 +434,7 @@ def subject_summary(
         result.append(
             {
                 "id": subject_id,
-                "name": data["name"],
+                "name": name,
                 "total": total,
                 "attended": attended,
                 "absent": absent,
@@ -478,6 +477,7 @@ def apply_document(db: Session, doc) -> int:
 
     start, end = window
     if start > end:
+        doc.meta = {**(doc.meta or {}), "excused_lessons": 0}
         return 0
 
     stmt = select(LessonOccurrence).where(
@@ -525,26 +525,32 @@ def apply_document(db: Session, doc) -> int:
                     occurrence_id=occurrence.id,
                     member_id=student_id,
                     status=AttendanceStatus.EXCUSED,
+                    comment=comment,
+                    source="document",
+                    document_id=doc.id,
+                    marked_at=now_local(),
                 )
                 db.add(row)
                 changed += 1
-            elif row.status == AttendanceStatus.EXCUSED and row.document_id not in (
-                None,
-                doc.id,
-            ):
+                total += 1
                 continue
-            elif row.status == AttendanceStatus.PRESENT:
+
+            # Строку уже освободил другой документ или староста явно поставил
+            # «присутствовал» — этот документ её не трогает.
+            if row.status == AttendanceStatus.PRESENT:
                 continue
-            else:
-                if row.status != AttendanceStatus.EXCUSED:
-                    row.previous_status = row.status or AttendanceStatus.ABSENT
-                if row.status != AttendanceStatus.EXCUSED or row.document_id != doc.id:
-                    changed += 1
-                row.status = AttendanceStatus.EXCUSED
-                row.comment = comment
-                row.source = "document"
-                row.document_id = doc.id
-                row.marked_at = now_local()
+            if row.status == AttendanceStatus.EXCUSED and row.document_id not in (None, doc.id):
+                continue
+
+            if row.status != AttendanceStatus.EXCUSED:
+                row.previous_status = row.status or AttendanceStatus.ABSENT
+            if row.status != AttendanceStatus.EXCUSED or row.document_id != doc.id:
+                changed += 1
+            row.status = AttendanceStatus.EXCUSED
+            row.comment = comment
+            row.source = "document"
+            row.document_id = doc.id
+            row.marked_at = now_local()
             total += 1
 
     db.flush()
@@ -568,7 +574,9 @@ def revert_document(db: Session, doc) -> int:
         row.previous_status = None
         row.document_id = None
         row.source = "head"
-        row.comment = "Документ отозван"
+        # Старый комментарий относился к документу и после отзыва/удаления
+        # вводил бы в заблуждение.
+        row.comment = None
         changed += 1
     db.flush()
     doc.meta = {**(doc.meta or {}), "excused_lessons": 0}

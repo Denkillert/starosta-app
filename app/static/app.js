@@ -44,41 +44,6 @@
     });
   });
 
-  // --- цвет select по статусу -------------------------------------------
-  var STATUS_CLASSES = [
-    "status-present",
-    "status-late",
-    "status-absent",
-    "status-excused",
-    "status-not_answered",
-  ];
-
-  function paint(select) {
-    STATUS_CLASSES.forEach(function (name) {
-      select.classList.remove(name);
-    });
-    select.classList.add("status-" + select.value);
-  }
-
-  document.addEventListener("change", function (event) {
-    if (event.target && event.target.classList.contains("status-select")) {
-      paint(event.target);
-    }
-  });
-
-  // --- «Все были» --------------------------------------------------------
-  document.querySelectorAll("[data-all-present]").forEach(function (button) {
-    button.addEventListener("click", function () {
-      var form = button.closest("form");
-      if (!form) return;
-      form.querySelectorAll(".status-select").forEach(function (select) {
-        select.value = "present";
-        paint(select);
-      });
-      showToast("Отмечено «Был». Не забудьте сохранить.");
-    });
-  });
-
   // --- подтверждение опасных действий -----------------------------------
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (event) {
@@ -88,12 +53,16 @@
     });
   });
 
-  // --- условные поля формы документа ------------------------------------
-  document.querySelectorAll("[data-doc-form]").forEach(function (form) {
-    var type = form.getAttribute("data-doc-type");
-    form.querySelectorAll("[data-show-for]").forEach(function (block) {
-      var allowed = (block.getAttribute("data-show-for") || "").split(/\s+/);
-      block.hidden = allowed.indexOf(type) === -1;
+  // --- скачивание файлов --------------------------------------------------
+  // Внутри Telegram WebView файлы не сохраняются: ссылку нужно отдать
+  // системному браузеру через WebApp.openLink.
+  document.querySelectorAll("a[data-external]").forEach(function (link) {
+    link.addEventListener("click", function (event) {
+      var telegram = window.Telegram && window.Telegram.WebApp;
+      if (!telegram || typeof telegram.openLink !== "function") return;
+      if (telegram.platform === "web") return;
+      event.preventDefault();
+      telegram.openLink(link.href);
     });
   });
 

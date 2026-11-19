@@ -18,6 +18,7 @@ import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html.parser import HTMLParser
+from pathlib import Path
 
 import httpx
 
@@ -324,6 +325,8 @@ def _attach_dates(lessons: list[ParsedLesson], weeks: list[ParsedWeek]) -> None:
     if not weeks:
         return
     by_number = {w.number: w for w in weeks}
+    # Сайт нумерует учебные недели со вторника по воскресенье, поэтому
+    # понедельник относится к той же календарной неделе, что и её начало.
     semester_start = min(w.start for w in weeks)
     for lesson in lessons:
         seen: set[date] = set()
@@ -487,10 +490,7 @@ def fetch_and_parse(group: str, term: int, *, fetcher=fetch_html) -> ParsedSched
 
 
 def load_payload_file(path) -> ParsedSchedule:
-    import json as _json
-    from pathlib import Path
-
-    data = _json.loads(Path(path).read_text(encoding="utf-8"))
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
     schedule = ParsedSchedule.from_payload(data)
     if not schedule.group:
         schedule.group = data.get("group", "")

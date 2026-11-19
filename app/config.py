@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # В dev-режиме пользователь определяется по заголовку X-Telegram-Id
     # (или DEV_TELEGRAM_ID). В продакшене — только по подписанному initData.
     dev_mode: bool = True
+    # true — гостевой вход разрешён и через туннель (небезопасно: любой, кто
+    # знает ссылку, попадёт в приложение под dev-пользователем).
+    dev_mode_public: bool = False
     dev_telegram_id: int = 100000001
     dev_user_name: str = "Староста"
 
@@ -79,9 +82,17 @@ class Settings(BaseSettings):
         raw = self.web_base_url.strip()
         parts = urlsplit(raw)
         host = (parts.hostname or "").strip().lower()
-        if host not in LOCAL_HOSTS:
+        scheme = parts.scheme.lower()
+        # Публичный адрес принимаем только как http(s) с настоящим хостом.
+        # Иначе (пусто, опечатка, «localhost») работаем по IP в Wi-Fi.
+        if scheme in {"http", "https"} and host and host not in LOCAL_HOSTS:
             return raw.rstrip("/")
-        port = parts.port or self.port
+        try:
+            port = parts.port or self.port
+        except ValueError:
+            # Кривой порт в WEB_BASE_URL («http://host:abc») не должен ронять
+            # приложение при импорте настроек.
+            port = self.port
         # Локальный сервер отдаёт обычный HTTP: https://127.0.0.1 — это ошибка
         # в настройках, из-за неё Telegram показывал ERR_SSL_PROTOCOL_ERROR.
         return urlunsplit(("http", f"{detect_lan_ip()}:{port}", "", "", ""))

@@ -34,7 +34,7 @@
     })();
   </script>
 </head>
-<body class="page-{{ ctx.page }} {{ 'in-telegram' if ctx.in_telegram else '' }}">
+<body class="page-{{ ctx.page }}">
   <header class="topbar">
     <div class="topbar-inner">
       <a class="brand" href="{{ url_with('/', group=ctx.group.id) }}">
@@ -86,9 +86,11 @@
       <a href="{{ url_with('/documents', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'documents' }}">
         <span class="tab-icon">▣</span><span>Документы</span>
       </a>
-      <a href="{{ url_with('/reports', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'reports' }}">
-        <span class="tab-icon">▥</span><span>Отчёты</span>
-      </a>
+      {% if ctx.is_staff %}
+        <a href="{{ url_with('/reports', group=ctx.group.id) }}" class="{{ 'active' if ctx.page == 'reports' }}">
+          <span class="tab-icon">▥</span><span>Отчёты</span>
+        </a>
+      {% endif %}
     </nav>
   {% endif %}
 
@@ -113,10 +115,14 @@
           if (response.ok) {
             window.location.reload();
           } else {
+            // Не блокируем повторную попытку на следующем переходе: при
+            // мобильном интернете первый запрос часто обрывается.
+            if (window.sessionStorage) sessionStorage.removeItem("starosta_auth_tried");
             console.warn("Telegram auth failed:", response.status);
           }
         })
         .catch(function (err) {
+          if (window.sessionStorage) sessionStorage.removeItem("starosta_auth_tried");
           console.warn("Telegram auth error:", err);
         });
     })();

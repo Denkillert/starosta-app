@@ -42,6 +42,45 @@ def verify_session(value: str | None, *, secret: str) -> int | None:
     return user_id
 
 
+FILE_TOKEN_TTL = 3600
+
+
+def sign_file_token(
+    *, user_id: int, group_id: int, secret: str | None = None, ttl: int = FILE_TOKEN_TTL
+) -> str:
+    """Ссылка на файл, которую можно открыть в браузере без cookie Telegram.
+
+    Mini App скачивает файлы только через системный браузер, а там cookie
+    веб-приложения уже нет — поэтому права подтверждаются подписью в ссылке.
+    """
+    secret = secret if secret is not None else session_secret()
+    expires = int(time.time()) + ttl
+    payload = f"file.{user_id}.{group_id}.{expires}"
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{user_id}.{group_id}.{expires}.{signature}"
+
+
+def verify_file_token(
+    token: str | None, *, secret: str | None = None
+) -> tuple[int, int] | None:
+    secret = secret if secret is not None else session_secret()
+    if not token or not secret:
+        return None
+    parts = token.split(".")
+    if len(parts) != 4:
+        return None
+    try:
+        user_id, group_id, expires = int(parts[0]), int(parts[1]), int(parts[2])
+    except ValueError:
+        return None
+    if expires < time.time():
+        return None
+    payload = f"file.{user_id}.{group_id}.{expires}"
+    expected = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, parts[3]):
+        return None
+    return user_id, group_id
+
 
 def validate_init_data(init_data: str, bot_token: str | None = None, max_age: int = 86400) -> dict | None:
     """Проверяет подпись Telegram WebApp initData.
@@ -71,7 +110,13 @@ def validate_init_data(init_data: str, bot_token: str | None = None, max_age: in
         auth_date = int(pairs.get("auth_date", "0"))
     except ValueError:
         return None
-    if max_age and auth_date and time.time() - auth_date > max_age:
+    # Без auth_date подпись можно было бы использовать вечно.
+    if auth_date <= 0:
+        return None
+    now = time.time()
+    if auth_date > now + 300:
+        return None
+    if max_age and now - auth_date > max_age:
         return None
     return pairs
 

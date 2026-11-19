@@ -16,21 +16,24 @@ from ..constants import (
     OccurrenceStatus,
     Role,
 )
-from ..deps import CurrentUser, DbSession
-from ..models import Document, LessonOccurrence, Membership
+from ..deps import CurrentUser, DbSession, OptionalUser
+from ..models import Document, LessonOccurrence, Membership, User
 from ..security import (
     MARKER_COOKIE,
     SESSION_COOKIE,
     SESSION_TTL,
     session_secret,
+    sign_file_token,
     sign_session,
     user_from_init_data,
     validate_init_data,
+    verify_file_token,
 )
 from ..services import attendance as attendance_service
 from ..services import audit, schedule_sync
 from ..services import demo as demo_service
 from ..services import documents as documents_service
+from ..services import group_db as group_db_service
 from ..services import groups as groups_service
 from ..services import schedule as schedule_service
 from ..services import vedomosti as vedomosti_service
@@ -41,15 +44,25 @@ from ..utils import (
     parse_int,
     today_local,
 )
-from ..web import build_context, render
+from ..web import WebContext, build_context, render
 
 router = APIRouter(include_in_schema=False)
 
 
 def _safe_next(value: str | None, fallback: str = "/") -> str:
-    if value and value.startswith("/") and not value.startswith("//"):
-        return value
-    return fallback
+    """Разрешает только локальный путь без перехода на чужой сайт.
+
+    «/\\evil.com» и «//evil.com» браузер понимает как внешний адрес, поэтому
+    такие значения и управляющие символы отбрасываем.
+    """
+    if not value:
+        return fallback
+    value = value.strip()
+    if not value.startswith("/") or value.startswith("//") or "\\" in value:
+        return fallback
+    if any(char in value for char in "\r\n\t"):
+        return fallback
+    return value
 
 
 def _redirect(url: str, *, msg: str | None = None, err: str | None = None) -> RedirectResponse:
@@ -94,7 +107,7 @@ def _parse_month(value: str | None, fallback: date | None = None) -> tuple[int, 
         parts = value.replace(".", "-").split("-")
         if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
             year, month = int(parts[0]), int(parts[1])
-            if 1 <= month <= 12:
+            if 1 <= year <= 9999 and 1 <= month <= 12:
                 return year, month
     return base.year, base.month
 
@@ -163,12 +176,16 @@ def dashboard(request: Request, db: DbSession, user: CurrentUser):
     totals = attendance_service.totals(stats)
 
     doc_counts = documents_service.counts_by_type(db, ctx.group.id)
-    pending_statements = documents_service.list_documents(
-        db,
-        ctx.group.id,
-        type_=DocType.STATEMENT,
-        status=DocStatus.PENDING,
-        limit=5,
+    pending_statements = (
+        documents_service.list_documents(
+            db,
+            ctx.group.id,
+            type_=DocType.STATEMENT,
+            status=DocStatus.PENDING,
+            limit=5,
+        )
+        if ctx.is_staff
+        else []
     )
 
     return render(
@@ -301,6 +318,7 @@ def students_page(request: Request, db: DbSession, user: CurrentUser):
         stats_by_member=stats_by_member,
         month_start=month_start,
         today=today,
+        db_token=sign_file_token(user_id=user.id, group_id=ctx.group.id),
     )
 
 
@@ -320,7 +338,19 @@ def documents_page(request: Request, db: DbSession, user: CurrentUser):
     items = documents_service.list_documents(
         db, ctx.group.id, type_=type_, status=status
     )
-    counts = documents_service.counts_by_type(db, ctx.group.id)
+    if ctx.is_staff:
+        counts = documents_service.counts_by_type(db, ctx.group.id)
+    else:
+        # Студент видит только общие распоряжения и свои документы — как и
+        # на странице документа. Раньше список показывал чужие справки.
+        items = [
+            document
+            for document in items
+            if documents_service.can_view(document, ctx.membership)
+        ]
+        counts = {type_: 0 for type_ in DocType.ALL}
+        for document in items:
+            counts[document.type] = counts.get(document.type, 0) + 1
     return render(
         request,
         "documents.html",
@@ -441,6 +471,8 @@ def stats_csv(request: Request, db: DbSession, user: CurrentUser):
     today = today_local()
     date_from = parse_date(request.query_params.get("from"), today.replace(day=1))
     date_to = parse_date(request.query_params.get("to"), today)
+    if date_from > date_to:
+        date_from, date_to = date_to, date_from
     stats = attendance_service.summary(db, ctx.group.id, date_from, date_to)
     subjects = attendance_service.subject_summary(db, ctx.group.id, date_from, date_to)
 
@@ -490,6 +522,11 @@ def reports_page(request: Request, db: DbSession, user: CurrentUser):
     ctx = build_context(request, db, user, page="reports")
     if ctx.group is None:
         return render(request, "onboarding.html", ctx)
+    if not _ensure_staff(ctx):
+        return _redirect(
+            f"/?group={ctx.group.id}",
+            err="Ведомости доступны старосте и заместителю",
+        )
 
     today = today_local()
     year, month = _parse_month(request.query_params.get("month"), today)
@@ -515,14 +552,54 @@ def reports_page(request: Request, db: DbSession, user: CurrentUser):
         prev_month=_month_value(prev_year, prev_month),
         next_month=_month_value(next_year, next_month),
         today=today,
+        # Ссылки на файлы: Mini App открывает их в системном браузере, где
+        # cookie нет, поэтому права подтверждает подпись в самой ссылке.
+        propuski_token=sign_file_token(user_id=user.id, group_id=ctx.group.id),
+        paid_token=sign_file_token(user_id=user.id, group_id=ctx.group.id),
     )
 
 
-@router.get("/reports/propuski.docx")
-def report_propuski(request: Request, db: DbSession, user: CurrentUser):
-    ctx = build_context(request, db, user, page="reports")
+def _download_context(
+    request: Request,
+    db: DbSession,
+    user: User | None,
+    token: str | None,
+    *,
+    group_id: int | None = None,
+) -> WebContext:
+    if user is None:
+        payload = verify_file_token(token)
+        if payload is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Ссылка на файл устарела — откройте страницу отчётов заново",
+            )
+        user_id, token_group_id = payload
+        user = db.get(User, user_id)
+        if user is None:
+            raise HTTPException(status_code=401, detail="Ссылка на файл устарела")
+        if group_id is not None and token_group_id != group_id:
+            raise HTTPException(status_code=403, detail="Нет доступа к этой группе")
+        ctx = build_context(
+            request, db, user, page="reports", group_id=token_group_id
+        )
+    else:
+        ctx = build_context(request, db, user, page="reports", group_id=group_id)
+
     if ctx.group is None:
         raise HTTPException(status_code=404)
+    if not _ensure_staff(ctx):
+        raise HTTPException(
+            status_code=403, detail="Ведомости доступны старосте и заместителю"
+        )
+    return ctx
+
+
+@router.get("/reports/propuski.docx")
+def report_propuski(
+    request: Request, db: DbSession, user: OptionalUser, token: str | None = None
+):
+    ctx = _download_context(request, db, user, token)
     year, month = _parse_month(request.query_params.get("month"), today_local())
     report = vedomosti_service.propuski_report(db, ctx.group, year, month)
     data = vedomosti_service.render_propuski(report)
@@ -533,10 +610,10 @@ def report_propuski(request: Request, db: DbSession, user: CurrentUser):
 
 
 @router.get("/reports/paid.docx")
-def report_paid(request: Request, db: DbSession, user: CurrentUser):
-    ctx = build_context(request, db, user, page="reports")
-    if ctx.group is None:
-        raise HTTPException(status_code=404)
+def report_paid(
+    request: Request, db: DbSession, user: OptionalUser, token: str | None = None
+):
+    ctx = _download_context(request, db, user, token)
     year, month = _parse_month(request.query_params.get("month"), today_local())
     report = vedomosti_service.paid_report(db, ctx.group, year, month)
     data = vedomosti_service.render_paid(report)
@@ -545,6 +622,25 @@ def report_paid(request: Request, db: DbSession, user: CurrentUser):
         f"{report.month_name} {year} {ctx.group.code}.docx"
     )
     return _docx_response(data, filename)
+
+
+@router.get("/groups/{group_id}/database.db")
+def group_database(
+    group_id: int,
+    request: Request,
+    db: DbSession,
+    user: OptionalUser,
+    token: str | None = None,
+):
+    ctx = _download_context(request, db, user, token, group_id=group_id)
+    if ctx.group.id != group_id:
+        raise HTTPException(status_code=404)
+    path = group_db_service.export_group(db, ctx.group)
+    return FileResponse(
+        path,
+        media_type="application/vnd.sqlite3",
+        filename=f"starosta-{ctx.group.code}.db",
+    )
 
 
 @router.get("/help")
@@ -653,6 +749,8 @@ async def action_sync(request: Request, db: DbSession, user: CurrentUser):
         return _redirect(_form_next(form, "/schedule"), err="Синхронизация доступна старосте и заместителю")
 
     term = parse_int(form.get("term"), ctx.term) or ctx.term
+    if term not in (1, 2):
+        term = ctx.term
     try:
         result = schedule_sync.sync_group(db, ctx.group, term, actor=user)
     except Exception as exc:  # noqa: BLE001 - показываем понятную ошибку в UI
@@ -830,6 +928,10 @@ async def action_create_document(request: Request, db: DbSession, user: CurrentU
         return _redirect("/documents", err="Недостаточно прав")
 
     type_ = str(form.get("type") or DocType.ORDER)
+    if type_ not in DocType.ALL:
+        return _redirect(
+            f"/documents?group={ctx.group.id}", err="Неизвестный тип документа"
+        )
     back = f"/documents/new?group={ctx.group.id}&type={type_}"
     student_ids = [
         int(value)

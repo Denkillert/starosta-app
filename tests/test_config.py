@@ -33,6 +33,15 @@ def test_public_https_url_is_kept(monkeypatch):
     assert settings.web_app_enabled is True
 
 
+def test_broken_base_url_falls_back_to_lan(monkeypatch):
+    # Опечатка вместо адреса не должна превращаться в «ссылку» для телефона.
+    monkeypatch.setattr("app.config.detect_lan_ip", lambda: "192.168.0.10")
+    settings = _settings(web_base_url="Thank")
+
+    assert settings.web_url == "http://192.168.0.10:8000"
+    assert settings.web_app_enabled is False
+
+
 def test_port_comes_from_settings_when_url_has_none(monkeypatch):
     monkeypatch.setattr("app.config.detect_lan_ip", lambda: "10.0.0.5")
     settings = _settings(web_base_url="http://localhost", port=9000)
