@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     # Секрет для подписи cookie-сессии. Если пуст, используется BOT_TOKEN.
     session_secret: str = ""
 
+    # Сообщать старосте и заму в Telegram о новых заявках по коду приглашения.
+    notify_staff_on_join: bool = True
+
     schedule_sync_hours: int = 6
     scheduler_enabled: bool = True
     scheduler_startup_delay_seconds: int = 60

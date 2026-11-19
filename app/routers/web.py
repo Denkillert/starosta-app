@@ -35,6 +35,7 @@ from ..services import demo as demo_service
 from ..services import documents as documents_service
 from ..services import group_db as group_db_service
 from ..services import groups as groups_service
+from ..services import notify as notify_service
 from ..services import schedule as schedule_service
 from ..services import vedomosti as vedomosti_service
 from ..utils import (
@@ -84,6 +85,16 @@ def _form_group_id(form) -> int | None:
     """Группа из скрытого поля формы: без него build_context возьмёт первую."""
     raw = str(form.get("group") or "")
     return int(raw) if raw.isdigit() else None
+
+
+def _form_subgroup(form) -> int | None:
+    """Подгруппа из формы: пусто/0 — не указана, иначе только 1 или 2."""
+    raw = str(form.get("subgroup") or "").strip()
+    if not raw or raw == "0":
+        return None
+    if raw not in ("1", "2"):
+        raise ValueError("Подгруппа может быть 1 или 2")
+    return int(raw)
 
 
 def _back(fallback: str, ctx) -> str:
@@ -309,6 +320,13 @@ def students_page(request: Request, db: DbSession, user: CurrentUser):
     stats = attendance_service.summary(db, ctx.group.id, month_start, today)
     stats_by_member = {item.member.id: item for item in stats}
     members = groups_service.group_members(db, ctx.group.id)
+    pending_members = [member for member in members if member.needs_review]
+    # Кого можно привязать к заявке: студенты, заведённые вручную без Telegram.
+    link_candidates = [
+        member
+        for member in members
+        if member.user_id is None and not member.needs_review
+    ]
 
     return render(
         request,
@@ -318,6 +336,8 @@ def students_page(request: Request, db: DbSession, user: CurrentUser):
         stats_by_member=stats_by_member,
         month_start=month_start,
         today=today,
+        pending_members=pending_members,
+        link_candidates=link_candidates,
         db_token=sign_file_token(user_id=user.id, group_id=ctx.group.id),
     )
 
@@ -721,11 +741,15 @@ async def action_create_group(request: Request, db: DbSession, user: CurrentUser
 async def action_join_group(request: Request, db: DbSession, user: CurrentUser):
     form = await request.form()
     try:
-        group, _membership = groups_service.join_by_invite(
+        group, membership = groups_service.join_by_invite(
             db, user=user, invite_code=str(form.get("invite_code") or "")
         )
     except groups_service.GroupError as exc:
         return _redirect("/", err=str(exc))
+    if membership.needs_review:
+        # Не блокируем вход студента, если Telegram недоступен: уведомление
+        # уходит «лучшим усилием».
+        await notify_service.notify_staff_join(db, group, membership, user)
     return _redirect("/", msg=f"Вы присоединились к группе {group.code}")
 
 
@@ -781,9 +805,15 @@ async def action_attendance_toggle(request: Request, db: DbSession, user: Curren
     if member is None or member.group_id != ctx.group.id:
         return _redirect(_form_next(form, "/journal"), err="Студент не найден")
 
-    status = attendance_service.toggle(
-        db, occurrence=occurrence, member=member, actor=user
-    )
+    try:
+        status = attendance_service.toggle(
+            db, occurrence=occurrence, member=member, actor=user
+        )
+    except ValueError as exc:
+        return _redirect(
+            _form_next(form, f"/journal?group={ctx.group.id}&date={occurrence.date}"),
+            err=str(exc),
+        )
     message = (
         f"Пропуск: {member.full_name}"
         if status == AttendanceStatus.ABSENT
@@ -874,9 +904,10 @@ async def action_add_student(request: Request, db: DbSession, user: CurrentUser)
             full_name=str(form.get("full_name") or ""),
             role=str(form.get("role") or Role.STUDENT),
             funding=str(form.get("funding") or "budget"),
+            subgroup=_form_subgroup(form),
             actor=user,
         )
-    except groups_service.GroupError as exc:
+    except (groups_service.GroupError, ValueError) as exc:
         return _redirect(_back("/students", ctx), err=str(exc))
     return _redirect(_back("/students", ctx), msg="Студент добавлен")
 
@@ -910,10 +941,49 @@ async def action_update_student(
             status=str(form.get("status") or "") or None,
             full_name=str(form.get("full_name") or "") or None,
             funding=str(form.get("funding") or "") or None,
+            subgroup=_form_subgroup(form),
+        )
+    except (groups_service.GroupError, ValueError) as exc:
+        return _redirect(_back("/students", ctx), err=str(exc))
+    return _redirect(_back("/students", ctx), msg="Данные обновлены")
+
+
+@router.post("/actions/students/{member_id}/link")
+async def action_link_student(
+    member_id: int, request: Request, db: DbSession, user: CurrentUser
+):
+    """Привязать Telegram из заявки к студенту, заведённому старостой."""
+    form = await request.form()
+    pending = db.get(Membership, member_id)
+    ctx = build_context(
+        request,
+        db,
+        user,
+        page="students",
+        group_id=pending.group_id if pending else _form_group_id(form),
+    )
+    if ctx.group is None:
+        return _redirect("/", err="Сначала создайте группу")
+    if not _ensure_staff(ctx):
+        return _redirect(_back("/students", ctx), err="Недостаточно прав")
+    if pending is None or pending.group_id != ctx.group.id:
+        return _redirect(_back("/students", ctx), err="Заявка не найдена")
+
+    target_id = _form_group_id({"group": form.get("target_member")})
+    target = db.get(Membership, target_id) if target_id else None
+    if target is None or target.group_id != ctx.group.id:
+        return _redirect(_back("/students", ctx), err="Выберите студента из группы")
+
+    try:
+        groups_service.link_pending_to_member(
+            db, pending=pending, target=target, actor=user
         )
     except groups_service.GroupError as exc:
         return _redirect(_back("/students", ctx), err=str(exc))
-    return _redirect(_back("/students", ctx), msg="Данные обновлены")
+    return _redirect(
+        _back("/students", ctx),
+        msg=f"Telegram привязан к «{target.full_name}»",
+    )
 
 
 @router.post("/actions/documents/create")

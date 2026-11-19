@@ -6,7 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..constants import Funding, MemberStatus, Role
-from ..models import Group, Membership, User
+from ..models import Attendance, Group, Lesson, LessonOccurrence, Membership, User
+from ..utils import lesson_fits_member, subgroup_number
 from . import audit
 
 
@@ -161,6 +162,7 @@ def join_by_invite(db: Session, *, user: User, invite_code: str) -> tuple[Group,
     if candidate is not None:
         candidate.user_id = user.id
         candidate.status = MemberStatus.ACTIVE
+        candidate.needs_review = False
         audit.log(
             db,
             action="group.join",
@@ -178,6 +180,7 @@ def join_by_invite(db: Session, *, user: User, invite_code: str) -> tuple[Group,
         full_name=user.full_name or "Студент",
         role=Role.STUDENT,
         status=MemberStatus.ACTIVE,
+        needs_review=True,
     )
     db.add(membership)
     db.flush()  # нужен id для записи в журнале действий
@@ -193,6 +196,20 @@ def join_by_invite(db: Session, *, user: User, invite_code: str) -> tuple[Group,
     return group, membership
 
 
+def _validate_subgroup(value) -> int | None:
+    """Подгруппа: 1, 2 или «не указана» (None)."""
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
+        return None
+    if value in (0, "0"):
+        return None
+    number = subgroup_number(value)
+    if number is None:
+        raise GroupError("Подгруппа может быть 1 или 2")
+    return number
+
+
 def add_member(
     db: Session,
     *,
@@ -202,6 +219,7 @@ def add_member(
     actor: User | None = None,
     student_no: str | None = None,
     funding: str = Funding.BUDGET,
+    subgroup: int | None = None,
 ) -> Membership:
     full_name = " ".join(full_name.split())
     if len(full_name) < 2:
@@ -212,6 +230,7 @@ def add_member(
         raise GroupError("Неизвестная роль")
     if funding not in Funding.ALL:
         raise GroupError("Неизвестная форма обучения")
+    subgroup = _validate_subgroup(subgroup)
 
     duplicate = _find_by_name(db, group.id, full_name)
     if duplicate:
@@ -224,6 +243,7 @@ def add_member(
         status=MemberStatus.ACTIVE,
         student_no=student_no,
         funding=funding,
+        subgroup=subgroup,
     )
     db.add(membership)
     db.flush()  # нужен id для записи в журнале действий
@@ -234,10 +254,13 @@ def add_member(
         actor_id=actor.id if actor else None,
         entity_type="membership",
         entity_id=membership.id,
-        payload={"full_name": full_name, "role": role},
+        payload={"full_name": full_name, "role": role, "subgroup": subgroup},
     )
     db.commit()
     return membership
+
+
+_UNSET = object()
 
 
 def update_member(
@@ -249,8 +272,11 @@ def update_member(
     status: str | None = None,
     full_name: str | None = None,
     funding: str | None = None,
+    subgroup=_UNSET,
+    mark_reviewed: bool = True,
 ) -> Membership:
     was_head = membership.role == Role.HEAD
+    previous_subgroup = membership.subgroup
     if role is not None:
         if role not in Role.ALL:
             raise GroupError("Неизвестная роль")
@@ -279,6 +305,16 @@ def update_member(
         if funding not in Funding.ALL:
             raise GroupError("Неизвестная форма обучения")
         membership.funding = funding
+    if subgroup is not _UNSET:
+        membership.subgroup = _validate_subgroup(subgroup)
+    if mark_reviewed:
+        membership.needs_review = False
+
+    purged = 0
+    if membership.subgroup != previous_subgroup:
+        # Студент подгруппы 1 не может иметь пропуски по лабораторным
+        # подгруппы 2 — старые отметки убираем.
+        purged = _purge_foreign_subgroup_marks(db, membership)
 
     audit.log(
         db,
@@ -292,10 +328,71 @@ def update_member(
             "role": membership.role,
             "status": membership.status,
             "funding": membership.funding,
+            "subgroup": membership.subgroup,
+            "removed_marks": purged,
         },
     )
     db.commit()
     return membership
+
+
+def _purge_foreign_subgroup_marks(db: Session, membership: Membership) -> int:
+    """Удаляет отметки по парам чужой подгруппы (например, лаб. подгр. 2)."""
+    rows = db.execute(
+        select(Attendance, Lesson.subgroup)
+        .join(LessonOccurrence, Attendance.occurrence_id == LessonOccurrence.id)
+        .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
+        .where(Attendance.member_id == membership.id)
+    ).all()
+    removed = 0
+    for row, lesson_subgroup in rows:
+        if not lesson_fits_member(lesson_subgroup, membership.subgroup):
+            db.delete(row)
+            removed += 1
+    return removed
+
+
+def link_pending_to_member(
+    db: Session,
+    *,
+    pending: Membership,
+    target: Membership,
+    actor: User | None = None,
+) -> Membership:
+    """Привязывает Telegram-аккаунт из заявки к уже заведённому студенту."""
+    if pending.id == target.id:
+        raise GroupError("Выберите другого студента")
+    if pending.group_id != target.group_id:
+        raise GroupError("Студенты из разных групп")
+    if pending.user_id is None:
+        raise GroupError("У заявки нет Telegram-аккаунта")
+    if target.user_id is not None:
+        raise GroupError("У этого студента уже привязан Telegram")
+
+    user_id = pending.user_id
+    pending_name = pending.full_name
+    pending_id = pending.id
+    db.delete(pending)
+    db.flush()
+
+    target.user_id = user_id
+    target.status = MemberStatus.ACTIVE
+    target.needs_review = False
+    audit.log(
+        db,
+        action="member.link",
+        group_id=target.group_id,
+        actor_id=actor.id if actor else None,
+        entity_type="membership",
+        entity_id=target.id,
+        payload={
+            "pending_id": pending_id,
+            "pending_name": pending_name,
+            "user_id": user_id,
+        },
+    )
+    db.commit()
+    return target
 
 
 def _ensure_not_last_head(db: Session, membership: Membership) -> None:

@@ -96,3 +96,40 @@ def parse_int(value, default: int | None = None) -> int | None:
 
 
 def parse_date(value: str | None, default: date | None = None) -> date | None:
+    if not value:
+        return default
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.strptime(value, fmt).date()
+        except ValueError:
+            continue
+    return default
+
+
+def subgroup_number(value) -> int | None:
+    """«1 группа», «2», 2 → 1/2. Пустое или непонятное значение → None."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value in (1, 2) else None
+    for char in str(value).strip():
+        if char.isdigit():
+            number = int(char)
+            return number if number in (1, 2) else None
+    return None
+
+
+def lesson_fits_member(lesson_subgroup, member_subgroup) -> bool:
+    """Подходит ли пара студенту с учётом подгруппы.
+
+    Лабораторные в расписании помечены «1 группа» / «2 группа». Студент
+    подгруппы 1 не может получить пропуск по лабораторной подгруппы 2.
+    Если у пары или у студента подгруппа не указана, пара считается общей.
+    """
+    lesson = subgroup_number(lesson_subgroup)
+    member = subgroup_number(member_subgroup)
+    if lesson is None or member is None:
+        return True
+    return lesson == member

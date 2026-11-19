@@ -1058,6 +1058,12 @@ input[type="file"] {
   min-width: 220px;
 }
 
+/* Заявка по коду приглашения: староста ещё не проверил данные. */
+.member.pending {
+  border-left: 3px solid var(--info);
+  background: var(--info-soft);
+}
+
 /* ---------------------------------------------------------------- документы */
 .doc-list,
 .report-list {
@@ -1490,6 +1496,13 @@ input[type="file"] {
   text-align: center;
   padding: 0 !important;
   width: 58px;
+}
+
+/* Пара другой подгруппы — отметка недоступна. */
+.att-cell.att-na {
+  color: var(--muted);
+  background: var(--surface-2);
+  font-size: 0.8rem;
 }
 
 .att-form {

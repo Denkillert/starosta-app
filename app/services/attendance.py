@@ -16,7 +16,7 @@ from ..constants import (
     Role,
 )
 from ..models import Attendance, Lesson, LessonOccurrence, Membership, Subject, User
-from ..utils import now_local
+from ..utils import lesson_fits_member, now_local, subgroup_number
 from . import audit
 from .schedule import list_day, list_range
 from .schedule_sync import latest_snapshot
@@ -74,6 +74,10 @@ class OccurrenceView:
 
     def status_for(self, member_id: int) -> str:
         return effective_status(self.marks.get(member_id))
+
+    def applies(self, member: Membership) -> bool:
+        """Относится ли пара к подгруппе студента."""
+        return lesson_fits_member(self.lesson.subgroup, member.subgroup)
 
     def symbol_for(self, member_id: int) -> str:
         return STATUS_SYMBOL.get(self.status_for(member_id), "")
@@ -165,7 +169,13 @@ def day_overview(
         if terms is not None and occurrence.lesson.term != terms:
             continue
         view = OccurrenceView(occurrence=occurrence)
-        for member in members:
+        applicable = [
+            member
+            for member in members
+            if lesson_fits_member(occurrence.lesson.subgroup, member.subgroup)
+        ]
+        applicable_ids = {member.id for member in applicable}
+        for member in applicable:
             view.marks[member.id] = Attendance(
                 occurrence_id=occurrence.id,
                 member_id=member.id,
@@ -179,7 +189,9 @@ def day_overview(
                 )
             ).all()
             for row in rows:
-                view.marks[row.member_id] = row
+                # Старые отметки «чужой» подгруппы не должны попадать в счёт.
+                if row.member_id in applicable_ids:
+                    view.marks[row.member_id] = row
         counts = {status: 0 for status in VISIBLE}
         for row in view.marks.values():
             status = effective_status(row)
@@ -206,6 +218,11 @@ def mark(
         raise ValueError("Студент и пара относятся к разным группам")
     if occurrence.status == OccurrenceStatus.CANCELLED:
         raise ValueError("Нельзя отметить отменённую пару")
+    if not lesson_fits_member(occurrence.lesson.subgroup, member.subgroup):
+        raise ValueError(
+            "Студент не в той подгруппе: эта пара для "
+            f"«{occurrence.lesson.subgroup}»"
+        )
 
     row = db.scalar(
         select(Attendance).where(
@@ -310,18 +327,33 @@ def summary(
     if not stats:
         return []
 
-    total_occurrences = db.scalar(
-        select(func.count(LessonOccurrence.id)).where(
+    total_occurrences = db.execute(
+        select(Lesson.subgroup, func.count(LessonOccurrence.id))
+        .select_from(LessonOccurrence)
+        .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
+        .where(
             LessonOccurrence.group_id == group_id,
             LessonOccurrence.date >= date_from,
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
         )
-    ) or 0
+        .group_by(Lesson.subgroup)
+    ).all()
+    counts_by_subgroup: dict[int | None, int] = {
+        subgroup_number(subgroup): int(count) for subgroup, count in total_occurrences
+    }
+    common_lessons = counts_by_subgroup.get(None, 0)
 
     rows = db.execute(
-        select(Attendance.member_id, Attendance.status, func.count(Attendance.id))
+        select(
+            Attendance.member_id,
+            Attendance.status,
+            Lesson.subgroup,
+            func.count(Attendance.id),
+        )
+        .select_from(Attendance)
         .join(LessonOccurrence, Attendance.occurrence_id == LessonOccurrence.id)
+        .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
         .where(
             LessonOccurrence.group_id == group_id,
             LessonOccurrence.date >= date_from,
@@ -329,19 +361,30 @@ def summary(
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
             Attendance.member_id.in_(list(stats.keys())),
         )
-        .group_by(Attendance.member_id, Attendance.status)
+        .group_by(Attendance.member_id, Attendance.status, Lesson.subgroup)
     ).all()
 
     raw: dict[int, dict[str, int]] = {}
-    for member_id, status, count in rows:
-        raw.setdefault(member_id, {})[status] = count
+    for member_id, status, subgroup, count in rows:
+        member = stats[member_id].member
+        if not lesson_fits_member(subgroup, member.subgroup):
+            continue
+        bucket = raw.setdefault(member_id, {})
+        bucket[status] = bucket.get(status, 0) + int(count)
 
     for member_id, item in stats.items():
+        member = item.member
+        if member.subgroup is None:
+            total = sum(counts_by_subgroup.values())
+        else:
+            total = common_lessons + counts_by_subgroup.get(
+                subgroup_number(member.subgroup), 0
+            )
         counts = raw.get(member_id, {})
         item.absent = counts.get(AttendanceStatus.ABSENT, 0)
         item.excused = counts.get(AttendanceStatus.EXCUSED, 0)
-        item.total = total_occurrences
-        item.present = max(0, total_occurrences - item.absent - item.excused)
+        item.total = total
+        item.present = max(0, total - item.absent - item.excused)
 
     return list(stats.values())
 
@@ -370,12 +413,30 @@ def totals(stats: list[StudentStats]) -> dict[str, int]:
 def subject_summary(
     db: Session, group_id: int, date_from: date, date_to: date
 ) -> list[dict]:
-    members_count = len(roster(db, group_id))
-    if not members_count:
+    members = roster(db, group_id)
+    if not members:
         return []
 
+    # Сколько студентов реально ходит на пару с такой подгруппой.
+    members_by_subgroup: dict[int | None, int] = {}
+    for member in members:
+        key = subgroup_number(member.subgroup)
+        members_by_subgroup[key] = members_by_subgroup.get(key, 0) + 1
+    members_without_subgroup = members_by_subgroup.get(None, 0)
+
+    def applicable_members(lesson_subgroup) -> int:
+        subgroup = subgroup_number(lesson_subgroup)
+        if subgroup is None:
+            return len(members)
+        return members_without_subgroup + members_by_subgroup.get(subgroup, 0)
+
     occurrences = db.execute(
-        select(Lesson.subject_id, Subject.name, func.count(LessonOccurrence.id))
+        select(
+            Lesson.subject_id,
+            Subject.name,
+            Lesson.subgroup,
+            func.count(LessonOccurrence.id),
+        )
         .select_from(LessonOccurrence)
         .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
         .join(Subject, Lesson.subject_id == Subject.id)
@@ -385,13 +446,15 @@ def subject_summary(
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
         )
-        .group_by(Lesson.subject_id, Subject.name)
+        .group_by(Lesson.subject_id, Subject.name, Lesson.subgroup)
     ).all()
 
     rows = db.execute(
         select(
             Lesson.subject_id,
             Subject.name,
+            Lesson.subgroup,
+            Membership.subgroup,
             func.sum(
                 case((Attendance.status == AttendanceStatus.ABSENT, 1), else_=0)
             ).label("absent"),
@@ -403,38 +466,53 @@ def subject_summary(
         .join(LessonOccurrence, Attendance.occurrence_id == LessonOccurrence.id)
         .join(Lesson, LessonOccurrence.lesson_id == Lesson.id)
         .join(Subject, Lesson.subject_id == Subject.id)
+        .join(Membership, Attendance.member_id == Membership.id)
         .where(
             LessonOccurrence.group_id == group_id,
             LessonOccurrence.date >= date_from,
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
         )
-        .group_by(Lesson.subject_id, Subject.name)
+        .group_by(
+            Lesson.subject_id,
+            Subject.name,
+            Lesson.subgroup,
+            Membership.subgroup,
+        )
     ).all()
 
-    stats_by_subject = {
-        subject_id: {
-            "name": name,
-            "absent": int(absent or 0),
-            "excused": int(excused or 0),
-        }
-        for subject_id, name, absent, excused in rows
-    }
+    stats_by_subject: dict[int, dict] = {}
+    for subject_id, name, lesson_subgroup, member_subgroup, absent, excused in rows:
+        # Пропуск «чужой» лабораторной не должен попадать в статистику.
+        if not lesson_fits_member(lesson_subgroup, member_subgroup):
+            continue
+        data = stats_by_subject.setdefault(
+            subject_id, {"name": name, "absent": 0, "excused": 0}
+        )
+        data["absent"] += int(absent or 0)
+        data["excused"] += int(excused or 0)
+
+    totals_by_subject: dict[int, dict] = {}
+    for subject_id, name, lesson_subgroup, count in occurrences:
+        data = totals_by_subject.setdefault(
+            subject_id, {"name": name, "total": 0, "absent": 0, "excused": 0}
+        )
+        data["total"] += int(count) * applicable_members(lesson_subgroup)
 
     result = []
-    for subject_id, name, count in occurrences:
+    for subject_id, data in totals_by_subject.items():
         # Предмет без единого пропуска тоже должен попасть в отчёт: раньше
         # он исчезал, потому что строки Attendance для него не было.
-        data = stats_by_subject.get(subject_id, {"absent": 0, "excused": 0})
-        total = int(count) * members_count
-        absent = data["absent"]
-        excused = data["excused"]
+        marks = stats_by_subject.get(subject_id, {"absent": 0, "excused": 0})
+        total = data["total"]
+        absent = marks["absent"]
+        excused = marks["excused"]
         attended = max(0, total - absent - excused)
         base = attended + absent
         result.append(
             {
                 "id": subject_id,
-                "name": name,
+                "name": data["name"],
                 "total": total,
                 "attended": attended,
                 "absent": absent,
@@ -502,6 +580,7 @@ def apply_document(db: Session, doc) -> int:
         return 0
 
     student_ids = [student.id for student in students]
+    member_by_id = {student.id: student for student in students}
     existing = {
         (row.member_id, row.occurrence_id): row
         for row in db.scalars(
@@ -518,7 +597,12 @@ def apply_document(db: Session, doc) -> int:
     total = 0
 
     for student_id in student_ids:
+        member = member_by_id.get(student_id)
         for occurrence in occurrences:
+            if member is None or not lesson_fits_member(
+                occurrence.lesson.subgroup, member.subgroup
+            ):
+                continue
             row = existing.get((student_id, occurrence.id))
             if row is None:
                 row = Attendance(
@@ -619,6 +703,8 @@ def month_matrix(
     for occurrence in occurrences:
         hours = HOURS_PER_LESSON
         for member in members:
+            if not lesson_fits_member(occurrence.lesson.subgroup, member.subgroup):
+                continue
             status = statuses.get((member.id, occurrence.id), AttendanceStatus.PRESENT)
             if status not in (AttendanceStatus.ABSENT, AttendanceStatus.EXCUSED):
                 continue

@@ -74,24 +74,28 @@
                 {% if member.role != 'student' %}<span class="badge">{{ member.role|role_label }}</span>{% endif %}
               </th>
               {% for view in views %}
-                {% set status = view.status_for(member.id) %}
-                <td class="att-cell att-{{ status }}">
-                  {% if ctx.is_staff and status != 'excused' %}
-                    <form method="post" action="/actions/attendance/toggle" class="att-form">
-                      <input type="hidden" name="group" value="{{ ctx.group.id }}">
-                      <input type="hidden" name="occurrence_id" value="{{ view.occurrence.id }}">
-                      <input type="hidden" name="member_id" value="{{ member.id }}">
-                      <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
-                      <button type="submit"
-                              class="att-btn att-btn-{{ status }}"
-                              title="{% if status == 'absent' %}Вернуть «присутствует»{% else %}Отметить пропуск{% endif %} · {{ member.full_name }} · {{ view.lesson.subject.name }}">
-                        {{ view.symbol_for(member.id) }}
-                      </button>
-                    </form>
-                  {% else %}
-                    <span class="att-btn att-btn-{{ status }}"{% if status == 'excused' %} title="Уважительная причина по документу"{% endif %}>{{ view.symbol_for(member.id) }}</span>
-                  {% endif %}
-                </td>
+                {% if not view.applies(member) %}
+                  <td class="att-cell att-na" title="Пара другой подгруппы">—</td>
+                {% else %}
+                  {% set status = view.status_for(member.id) %}
+                  <td class="att-cell att-{{ status }}">
+                    {% if ctx.is_staff and status != 'excused' %}
+                      <form method="post" action="/actions/attendance/toggle" class="att-form">
+                        <input type="hidden" name="group" value="{{ ctx.group.id }}">
+                        <input type="hidden" name="occurrence_id" value="{{ view.occurrence.id }}">
+                        <input type="hidden" name="member_id" value="{{ member.id }}">
+                        <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
+                        <button type="submit"
+                                class="att-btn att-btn-{{ status }}"
+                                title="{% if status == 'absent' %}Вернуть «присутствует»{% else %}Отметить пропуск{% endif %} · {{ member.full_name }} · {{ view.lesson.subject.name }}">
+                          {{ view.symbol_for(member.id) }}
+                        </button>
+                      </form>
+                    {% else %}
+                      <span class="att-btn att-btn-{{ status }}"{% if status == 'excused' %} title="Уважительная причина по документу"{% endif %}>{{ view.symbol_for(member.id) }}</span>
+                    {% endif %}
+                  </td>
+                {% endif %}
               {% endfor %}
             </tr>
           {% endfor %}
