@@ -7,8 +7,34 @@
   <title>{% block title %}Староста{% endblock %} · {{ app_name }}</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    // Ранняя инициализация Telegram WebApp: tg.ready() и tg.expand()
+    // должны вызываться ВСЕГДА при открытии внутри Telegram, иначе
+    // окно не развернётся на весь экран или покажет белый экран.
+    (function () {
+      var tg = window.Telegram && window.Telegram.WebApp;
+      if (!tg) return;
+      try {
+        tg.ready();
+        tg.expand();
+        tg.setHeaderColor && tg.setHeaderColor('#1f6feb');
+        tg.setBackgroundColor && tg.setBackgroundColor('#f2f5f9');
+      } catch (e) { /* старые клиенты */ }
+
+      // Применяем тему Telegram к CSS-переменным.
+      var p = tg.themeParams || {};
+      var root = document.documentElement;
+      if (p.bg_color)            root.style.setProperty('--tg-bg', p.bg_color);
+      if (p.text_color)          root.style.setProperty('--tg-text', p.text_color);
+      if (p.hint_color)          root.style.setProperty('--tg-hint', p.hint_color);
+      if (p.link_color)          root.style.setProperty('--tg-link', p.link_color);
+      if (p.button_color)        root.style.setProperty('--tg-button', p.button_color);
+      if (p.button_text_color)   root.style.setProperty('--tg-button-text', p.button_text_color);
+      if (p.secondary_bg_color)  root.style.setProperty('--tg-bg-2', p.secondary_bg_color);
+    })();
+  </script>
 </head>
-<body class="page-{{ ctx.page }}">
+<body class="page-{{ ctx.page }} {{ 'in-telegram' if ctx.in_telegram else '' }}">
   <header class="topbar">
     <div class="topbar-inner">
       <a class="brand" href="{{ url_with('/', group=ctx.group.id) }}">
@@ -68,22 +94,31 @@
 
   <script src="/static/app.js"></script>
   <script>
-    // Внутри Telegram меняем initData на cookie-сессию: обычные переходы
-    // по ссылкам не умеют передавать заголовок X-Telegram-Init-Data.
+    // Обмен initData на cookie-сессию. Выполняется один раз за сессию.
+    // tg.ready()/tg.expand() уже вызваны выше — здесь только авторизация.
     (function () {
       var tg = window.Telegram && window.Telegram.WebApp;
       if (!tg || !tg.initData) return;
       if (document.cookie.indexOf("starosta_auth=1") !== -1) return;
       if (window.sessionStorage && sessionStorage.getItem("starosta_auth_tried")) return;
       if (window.sessionStorage) sessionStorage.setItem("starosta_auth_tried", "1");
-      try { tg.ready(); tg.expand(); } catch (e) { /* старые клиенты */ }
+
       fetch("/auth/telegram", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ init_data: tg.initData })
-      }).then(function (response) {
-        if (response.ok) window.location.reload();
-      }).catch(function () { /* остаёмся в гостевом режиме */ });
+        body: JSON.stringify({ init_data: tg.initData }),
+        credentials: "same-origin"
+      })
+        .then(function (response) {
+          if (response.ok) {
+            window.location.reload();
+          } else {
+            console.warn("Telegram auth failed:", response.status);
+          }
+        })
+        .catch(function (err) {
+          console.warn("Telegram auth error:", err);
+        });
     })();
   </script>
   {% block scripts %}{% endblock %}

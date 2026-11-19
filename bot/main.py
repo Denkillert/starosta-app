@@ -95,7 +95,8 @@ def _app_hint() -> str:
     return (
         f"\n\nПриложение: {settings.web_url}\n"
         "Открывается в браузере телефона — телефон должен быть в той же Wi-Fi. "
-        "Режим Mini App внутри Telegram включается только на HTTPS-адресе."
+        "Режим Mini App внутри Telegram включается только на HTTPS-адресе "
+        "(cloudflared/ngrok)."
     )
 
 
@@ -352,11 +353,23 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("app"))
 async def cmd_app(message: Message) -> None:
     keyboard = _app_keyboard()
-    await message.answer(
-        "Открыть приложение:" if settings.web_app_enabled
-        else f"Приложение: {settings.web_url}",
-        reply_markup=keyboard,
-    )
+    if settings.web_app_enabled:
+        await message.answer(
+            f"Mini App активен: <code>{settings.web_url}</code>",
+            reply_markup=keyboard,
+        )
+    else:
+        await message.answer(
+            "<b>Mini App выключен.</b>\n\n"
+            f"Текущий адрес: <code>{settings.web_url}</code>\n\n"
+            "Telegram открывает WebApp только по HTTPS. Чтобы включить:\n"
+            "1. Запусти cloudflared: <code>tools\\cloudflared.exe tunnel --url http://localhost:8000</code>\n"
+            "2. Скопируй https://...trycloudflare.com из окна туннеля\n"
+            "3. Впиши его в <code>.env</code>: <code>WEB_BASE_URL=https://...</code>\n"
+            "4. Перезапусти бота\n"
+            "5. В @BotFather: <code>/setmenubutton</code> → вставь этот же URL",
+            reply_markup=keyboard,
+        )
 
 
 @router.message(Command("today"))
@@ -535,7 +548,8 @@ async def main() -> None:
     except TelegramAPIError as exc:
         print(f"Не удалось обновить профиль бота: {exc}")
 
-    print("Бот запущен. Остановить: Ctrl+C")
+    print(f"Бот запущен. Остановить: Ctrl+C")
+    print(settings.mini_app_status)
     await dispatcher.start_polling(bot)
 
 

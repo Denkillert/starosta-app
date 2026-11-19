@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
 
-    # Учебные часы в одной паре и стоимость платной отработки.
+    # Учебные часы в одной паре и стоимость платной отработки за пару.
     academic_hours_per_lesson: int = 2
     paid_lesson_rate: float = 18.47
 
@@ -73,14 +73,17 @@ class Settings(BaseSettings):
 
         Если в WEB_BASE_URL стоит localhost или 0.0.0.0, подставляется IP
         компьютера в Wi-Fi — такой адрес открывается с телефона в браузере.
+        Если стоит публичный HTTPS-адрес (cloudflared/ngrok/домен) — он
+        используется как есть и включает режим Mini App.
         """
-        parts = urlsplit(self.web_base_url.strip())
+        raw = self.web_base_url.strip()
+        parts = urlsplit(raw)
         host = (parts.hostname or "").strip().lower()
         if host not in LOCAL_HOSTS:
-            return self.web_base_url.rstrip("/")
+            return raw.rstrip("/")
         port = parts.port or self.port
         # Локальный сервер отдаёт обычный HTTP: https://127.0.0.1 — это ошибка
-        # в настройках, из-за неё Telegram и показывал ERR_SSL_PROTOCOL_ERROR.
+        # в настройках, из-за неё Telegram показывал ERR_SSL_PROTOCOL_ERROR.
         return urlunsplit(("http", f"{detect_lan_ip()}:{port}", "", "", ""))
 
     @property
@@ -88,7 +91,22 @@ class Settings(BaseSettings):
         """Mini App в Telegram требует публичный HTTPS-адрес."""
         return self.web_url.startswith("https://")
 
+    @property
+    def mini_app_status(self) -> str:
+        """Человекочитаемый статус Mini App — для логов и подсказок в боте."""
+        if self.web_app_enabled:
+            return f"Mini App готов: {self.web_url}"
+        return (
+            f"Mini App НЕ включён. Текущий адрес: {self.web_url}. "
+            "Telegram открывает WebApp только по HTTPS. "
+            "Запусти cloudflared/ngrok и пропиши https://... в WEB_BASE_URL в .env, "
+            "затем перезапусти бота и настрой /setmenubutton в @BotFather."
+        )
+
 
 settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 (BASE_DIR / "data").mkdir(parents=True, exist_ok=True)
+
+# Явно пишем в консоль при импорте, чтобы было видно, в каком режиме стартует.
+print(f"[config] {settings.mini_app_status}")

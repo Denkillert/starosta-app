@@ -2,10 +2,11 @@
 cd /d "%~dp0"
 
 echo ========================================
-echo   Starosta launcher
+echo   Starosta launcher (Secure Local Dev)
 echo ========================================
 echo.
 
+rem --- Check virtual environment ---
 if not exist ".venv\Scripts\python.exe" (
     echo ERROR: .venv not found.
     echo Run: python -m venv .venv
@@ -13,57 +14,67 @@ if not exist ".venv\Scripts\python.exe" (
     exit /b 1
 )
 
+rem --- Check cloudflared ---
 if not exist "tools\cloudflared.exe" (
     echo ERROR: tools\cloudflared.exe not found.
-    echo Download cloudflared-windows-amd64.exe from:
-    echo   https://github.com/cloudflare/cloudflared/releases/latest
-    echo Save it as tools\cloudflared.exe
     pause
     exit /b 1
 )
 
-echo [1/3] Starting web server on port 8000...
-start "Starosta Web" cmd /k ".venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+rem --- Clean old log ---
+del /q "%TEMP%\cloudflared.log" 2>nul
 
-timeout /t 3 /nobreak >nul
+echo [1/4] Starting Cloudflare tunnel...
+rem Запускаем cloudflared БЕЗ --no-tls-verify для безопасности.
+rem Если здесь будет ошибка сертификата, проверьте настройки антивируса/сети.
+start /b "" cmd /c "tools\cloudflared.exe tunnel --url http://127.0.0.1:8000 > "%TEMP%\cloudflared.log" 2>&1"
 
-echo [2/3] Starting Cloudflare HTTPS tunnel...
-start "Starosta Tunnel" cmd /k "tools\cloudflared.exe tunnel --url http://localhost:8000"
+echo     Waiting for HTTPS URL (up to 20 sec)...
+set HTTPS_URL=
 
-timeout /t 8 /nobreak >nul
+rem Ждём появления URL. Регулярное выражение строго ограничено доменом trycloudflare.com
+for /L %%i in (1,1,20) do (
+    timeout /t 1 /nobreak >nul
+    if exist "%TEMP%\cloudflared.log" (
+        for /f "delims=" %%u in ('powershell -NoProfile -Command "$m = Select-String -Path '%TEMP:\=\\%\\cloudflared.log' -Pattern 'https://[a-z0-9\-]{1,50}\.trycloudflare\.com' | Select-Object -First 1; if ($m) { $m.Matches.Value }"') do (
+            if not defined HTTPS_URL set HTTPS_URL=%%u
+        )
+        if defined HTTPS_URL goto :url_found
+    )
+)
 
-echo [3/3] Starting Telegram bot...
+echo ERROR: Could not get URL from cloudflared.
+echo Check %TEMP%\cloudflared.log for details.
+echo TIP: If you see TLS certificate errors, update your OS root certificates or check antivirus HTTPS scanning settings.
+pause
+exit /b 1
+
+:url_found
+echo     Got URL: %HTTPS_URL%
+
+echo [2/4] Updating .env...
+rem Безопасное обновление .env через PowerShell
+powershell -NoProfile -Command "$f = '.env'; $c = Get-Content $f -Raw; $n = $c -replace '(?m)^WEB_BASE_URL=.*$', 'WEB_BASE_URL=%HTTPS_URL%'; if ($n -ne $c) { [System.IO.File]::WriteAllText($f, $n, [System.Text.Encoding]::UTF8) }; Write-Host '    .env updated.'"
+echo.
+
+echo [3/4] Starting web server (Localhost only)...
+rem ИСПРАВЛЕНО: Привязка только к 127.0.0.1, а не к 0.0.0.0
+start "Starosta Web" cmd /k ".venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+
+timeout /t 2 /nobreak >nul
+
+echo [4/4] Starting bot...
 start "Starosta Bot" cmd /k ".venv\Scripts\python.exe -m bot.main"
 
 echo.
 echo ========================================
-echo   IMPORTANT - 4 steps to enable Mini App
+echo   All processes started securely
 echo ========================================
 echo.
-echo 1. Open the "Starosta Tunnel" window.
-echo    Wait until you see a line like:
-echo      https://random-words-trycloudflare.trycloudflare.com
-echo    COPY that URL (right-click -^> Mark -^> Enter).
+echo URL: %HTTPS_URL%
 echo.
-echo 2. Open .env in this folder and change:
-echo      WEB_BASE_URL=https://random-words-trycloudflare.trycloudflare.com
-echo    Save the file.
-echo.
-echo 3. Restart the bot:
-echo    - Close the "Starosta Bot" window
-echo    - Run: .venv\Scripts\python.exe -m bot.main
-echo    (or just close all windows and run this bat again)
-echo.
-echo 4. In @BotFather:
-echo      /setmenubutton
-echo      -^> choose your bot
-echo      -^> paste the SAME https:// URL
-echo      -^> type button text: Open app
-echo.
-echo After step 4, open your bot in Telegram.
-echo The menu button (left of input field) will show "Open app".
-echo Tapping it opens the Mini App inside Telegram.
-echo.
+echo The bot will automatically update the Telegram menu button.
+echo Web server is bound to 127.0.0.1 (local access only via tunnel).
 echo To stop: close all three "Starosta" windows.
 echo.
 pause
