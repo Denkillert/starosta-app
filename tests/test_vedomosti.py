@@ -230,3 +230,144 @@ def test_docx_reports_match_university_layout():
     assert table.rows[6].cells[1].text == "Гриценяк Кирилл Вадимович"
     assert table.rows[6].cells[3].text == "06.10.2025"
     assert table.rows[6].cells[5].text == "18,47"
+
+
+# Ширины колонок бланков (twips) — берутся из образцов университета.
+PROPUSKI_GRID = (
+    279, 1570, 407,
+    279, 249, 249, 249, 249, 249, 249, 249, 249, 249, 248,
+    247, 247, 247, 247, 247, 247, 247, 247, 247, 247, 247, 247, 247,
+    236, 258, 247, 247, 247, 247, 247,
+    458, 522, 409,
+)
+PAID_GRID = (933, 855, 1343, 1009, 263, 576, 697, 94, 225, 1056, 965, 514, 1961)
+
+
+def _font(cell) -> tuple[str | None, float | None, bool, bool]:
+    run = cell.paragraphs[0].runs[0]
+    return (
+        run.font.name,
+        run.font.size.pt if run.font.size else None,
+        bool(run.bold),
+        bool(run.italic),
+    )
+
+
+def _all_text(document) -> str:
+    return "\n".join("".join(element.itertext()) for element in document.element.body.iter(qn("w:p")))
+
+
+def test_propuski_repeats_university_blank():
+    group = SimpleNamespace(id=1, code="24ИТ-7")
+    member = SimpleNamespace(full_name="Иванов Иван Иванович", funding="paid")
+    report = vedomosti.PropuskiReport(
+        group=group,
+        year=2026,
+        month=9,
+        first=date(2026, 9, 1),
+        last=date(2026, 9, 30),
+        course=2,
+        students=[
+            SimpleNamespace(
+                member=member, days={3: 2}, total_hours=2, excused_hours=0, absent_hours=2
+            )
+        ],
+    )
+    document = DocxDocument(BytesIO(vedomosti.render_propuski(report)))
+    section = document.sections[0]
+    assert round(section.page_width.cm, 2) == 21.0
+    assert round(section.page_height.cm, 2) == 29.7
+    assert (
+        round(section.left_margin.cm, 2),
+        round(section.right_margin.cm, 2),
+        round(section.top_margin.cm, 2),
+        round(section.bottom_margin.cm, 2),
+    ) == (1.27, 1.27, 0.75, 0.5)
+
+    main = document.tables[0]
+    assert tuple(_grid(main)) == PROPUSKI_GRID
+    assert len(main.rows) == 3  # шапка в 2 строки + ученик
+    assert _font(main.cell(0, 0)) == ("Arial", 7.0, True, True)
+    assert main.cell(0, 0).text == "№ п/п"
+    assert main.cell(0, 3).text == "1"
+    assert main.cell(0, 33).text == "31"
+    assert main.cell(0, 34).text == "ИТОГО"
+    assert main.cell(1, 35).text == "По уваж."
+    assert main.cell(1, 36).text == "Безуваж."
+    # строка ученика: номер, ФИО, форма обучения, отметка дня, итоги
+    assert [cell.text for cell in main.rows[2].cells[:3]] == ["1", "Иванов И.И.", "П"]
+    assert main.rows[2].cells[5].text == "2"
+    assert main.rows[2].cells[34].text == "2"
+    assert main.rows[2].cells[36].text == "2"
+
+    # шапка ведомости заполнена, токенов не осталось
+    text = _all_text(document)
+    assert "за сентябрь месяц 2026 г." in text
+    assert "24ИТ-7" in text
+    assert "{{" not in text
+
+    assert document.tables[1].cell(0, 0).text == "Справки"
+    assert document.tables[1].cell(0, 2).text == "Заявления"
+    assert document.tables[1].cell(0, 4).text == "Распоряжения"
+    assert document.tables[2].cell(0, 0).text == "Ф.И.О. студента"
+    assert len(document.tables[1].rows) == 2 + vedomosti.DOCS_MIN_ROWS
+    assert len(document.tables[2].rows) == 1 + vedomosti.PAID_WORK_MIN_ROWS
+    # разрыв страницы между двумя ведомостями
+    assert any(
+        br.get(qn("w:type")) == "page"
+        for br in document.element.body.findall(".//" + qn("w:br"))
+    )
+
+
+def test_paid_repeats_university_blank():
+    group = SimpleNamespace(id=1, code="24ИТ-2")
+    member = SimpleNamespace(full_name="Гриценяк Кирилл Вадимович", funding="budget")
+    report = vedomosti.PaidReport(
+        group=group,
+        year=2026,
+        month=10,
+        course=3,
+        groups=[
+            vedomosti.PaidGroup(
+                subject="Физическая культура",
+                teacher="Снитко Алина Николаевна",
+                entries=[
+                    vedomosti.PaidRow(
+                        member=member,
+                        day=date(2026, 10, 6),
+                        kind="lab",
+                        hours=2,
+                        amount=18.47,
+                    )
+                ],
+            ),
+            vedomosti.PaidGroup(subject="Эконометрика", teacher="Иванов И.И.", entries=[]),
+        ],
+    )
+    document = DocxDocument(BytesIO(vedomosti.render_paid(report)))
+    section = document.sections[0]
+    assert (
+        round(section.left_margin.cm, 2),
+        round(section.right_margin.cm, 2),
+        round(section.top_margin.cm, 2),
+        round(section.bottom_margin.cm, 2),
+    ) == (3.0, 1.5, 2.0, 2.0)
+    assert document.styles["Normal"].font.name == "Times New Roman"
+    assert document.styles["Normal"].font.size.pt == 14
+
+    assert len(document.tables) == 2
+    assert all(tuple(_grid(table)) == PAID_GRID for table in document.tables)
+    first = document.tables[0]
+    assert len(first.rows) == vedomosti.PAID_HEADER_ROWS + 20
+    assert first.cell(0, 0).text == "Физическая культура"
+    assert first.cell(0, 12).text == "Снитко Алина Николаевна"
+    assert first.rows[2].cells[2].text == "Октябрь"
+    assert first.rows[2].cells[9].text == "24ИТ-2"
+    assert first.rows[6].cells[0].text == "1."
+    assert first.rows[6].cells[1].text == "Гриценяк Кирилл Вадимович"
+    assert first.rows[6].cells[3].text == "06.10.2026"
+    assert first.rows[6].cells[5].text == "18,47"
+    assert document.tables[1].cell(0, 0).text == "Эконометрика"
+    # страница на каждую дисциплину
+    assert len(document.element.body.findall(".//" + qn("w:br"))) == 1
+

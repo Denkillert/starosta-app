@@ -42,6 +42,8 @@ $sshExe = Join-Path $env:WINDIR 'System32\OpenSSH\ssh.exe'
 $sshLog = Join-Path $env:TEMP 'ssh-tunnel.log'
 $sshErrLog = Join-Path $env:TEMP 'ssh-tunnel.err.log'
 $knownHosts = Join-Path $env:TEMP 'starosta-known_hosts'
+$watchScript = Join-Path $root 'tools\tunnel-watch.ps1'
+$watchLog = Join-Path $env:TEMP 'starosta-watch.log'
 
 $urlPatternCloudflare = 'https://[a-z0-9-]+\.trycloudflare\.com'
 $urlPatternSsh = 'https://[a-z0-9-]+\.(?:app\.)?lhr\.life|https://[a-z0-9-]+\.(?:run\.)?pinggy(?:-free)?\.(?:link|net)'
@@ -112,6 +114,11 @@ Get-CimInstance Win32_Process -Filter "Name = 'cloudflared.exe'" -ErrorAction Si
 # SSH-туннель localhost.run, запущенный прошлым стартом (чужие ssh-сессии не трогаем).
 Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -and ($_.CommandLine -like '*localhost.run*' -or $_.CommandLine -like '*pinggy*') } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+# Сторож прошлого запуска: новый запуск поднимет его заново.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like '*tunnel-watch.ps1*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 
 Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue |
@@ -198,8 +205,10 @@ if (-not $tunnelUrl) {
         '-T',
         '-o', 'StrictHostKeyChecking=accept-new',
         '-o', "UserKnownHostsFile=$knownHosts",
-        '-o', 'ServerAliveInterval=20',
-        '-o', 'ServerAliveCountMax=3',
+        '-o', 'ServerAliveInterval=15',
+        '-o', 'ServerAliveCountMax=4',
+        '-o', 'TCPKeepAlive=yes',
+        '-o', 'ConnectTimeout=15',
         '-o', 'ExitOnForwardFailure=yes',
         '-R', "80:127.0.0.1:$port",
         'nokey@localhost.run'
@@ -250,6 +259,17 @@ Write-Step "[4/4] Бот"
 $botCmd = "`"$pythonExe`" -m bot.main"
 Start-Process -FilePath 'cmd.exe' -ArgumentList '/k', $botCmd -WorkingDirectory $root
 
+# --- 5. Сторож -------------------------------------------------------------
+# Следит, чтобы сервер, бот и туннель не оставались лежать, и переносит
+# новый адрес localhost.run в .env (бесплатный тариф меняет домен сам).
+if (Test-Path $watchScript) {
+    Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', "`"$watchScript`"") `
+        -WorkingDirectory $root -WindowStyle Hidden
+} else {
+    Write-Host "ПРЕДУПРЕЖДЕНИЕ: не найден tools\tunnel-watch.ps1 — автоперезапуск отключён." -ForegroundColor Yellow
+}
+
 # --- Итог -----------------------------------------------------------------
 $lanIp = (& $pythonExe -c "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(('8.8.8.8', 80)); print(s.getsockname()[0])") 2>$null
 if (-not $lanIp) { $lanIp = '127.0.0.1' }
@@ -267,8 +287,9 @@ if ($tunnelKind -eq 'ssh') {
     Write-Host "  Туннель работает в фоне (ssh.exe); следующий запуск его перезапустит." -ForegroundColor DarkGray
     Write-Host "  Лог туннеля: $sshLog" -ForegroundColor DarkGray
 } else {
-    Write-Host "  Остановить: закройте окно туннеля (и остальные)." -ForegroundColor DarkGray
     Write-Host "  Лог туннеля: $errLog" -ForegroundColor DarkGray
 }
+Write-Host "  Сторож (перезапуск сервера/бота/туннеля): $watchLog" -ForegroundColor DarkGray
+Write-Host "  Полностью остановить: stop.bat" -ForegroundColor DarkGray
 Write-Host ""
 Read-Host "Enter для закрытия этого окна"

@@ -6,7 +6,6 @@ from app.config import Settings
 def _settings(**kwargs) -> Settings:
     return Settings(_env_file=None, **kwargs)
 
-
 def test_localhost_base_url_becomes_lan_ip(monkeypatch):
     monkeypatch.setattr("app.config.detect_lan_ip", lambda: "192.168.0.10")
     settings = _settings(web_base_url="http://localhost:8000")
@@ -47,3 +46,33 @@ def test_port_comes_from_settings_when_url_has_none(monkeypatch):
     settings = _settings(web_base_url="http://localhost", port=9000)
 
     assert settings.web_url == "http://10.0.0.5:9000"
+
+
+def test_read_env_value_handles_quotes_and_comments(tmp_path):
+    from app import config
+
+    path = tmp_path / ".env"
+    path.write_text(
+        "# комментарий\nBOT_TOKEN=123\nWEB_BASE_URL='https://abc.app.lhr.life'\n",
+        encoding="utf-8",
+    )
+
+    assert config.read_env_value("WEB_BASE_URL", path) == "https://abc.app.lhr.life"
+    assert config.read_env_value("MISSING", path) is None
+
+
+def test_refresh_web_base_url_picks_up_new_tunnel(monkeypatch, tmp_path):
+    from app import config
+
+    monkeypatch.setattr(config.settings, "web_base_url", "https://old.app.lhr.life")
+    path = tmp_path / ".env"
+    path.write_text("WEB_BASE_URL=https://old.app.lhr.life\n", encoding="utf-8")
+
+    # Тот же адрес — ничего не меняем и не трогаем Telegram.
+    assert config.refresh_web_base_url(path) is False
+    assert config.settings.web_base_url == "https://old.app.lhr.life"
+
+    # localhost.run выдал новый домен — процесс должен увидеть его без рестарта.
+    path.write_text("WEB_BASE_URL=https://new.app.lhr.life\n", encoding="utf-8")
+    assert config.refresh_web_base_url(path) is True
+    assert config.settings.web_base_url == "https://new.app.lhr.life"

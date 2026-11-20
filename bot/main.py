@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+from contextlib import suppress
 from datetime import timedelta
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -21,8 +22,6 @@ from aiogram.types import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    MenuButtonDefault,
-    MenuButtonWebApp,
     Message,
     WebAppInfo,
 )
@@ -38,6 +37,8 @@ from app.services import schedule as schedule_service
 from app.services import schedule_sync
 from app.services.groups import GroupError, ensure_user, join_by_invite, membership_for_telegram
 from app.services.notify import notify_staff_join
+from app.services.telegram_menu import apply_menu_button
+from app.services.tunnel import watch_base_url
 from app.utils import today_local
 
 router = Router()
@@ -573,25 +574,21 @@ async def main() -> None:
         )
         # Кнопка меню слева от поля ввода. Обновляется при каждом запуске,
         # поэтому при смене адреса туннеля не нужно заходить в @BotFather.
-        if settings.web_app_enabled:
-            await bot.set_chat_menu_button(
-                menu_button=MenuButtonWebApp(
-                    text="Приложение",
-                    web_app=WebAppInfo(url=settings.web_url),
-                )
-            )
-        else:
-            # Если туннель отключён, кнопка меню не должна вести на мёртвый
-            # HTTPS-адрес от прошлого запуска.
-            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        # Если туннель отключён, кнопка вернётся к стандартной и не будет
+        # вести на мёртвый HTTPS-адрес прошлого запуска.
+        await apply_menu_button()
     except TelegramAPIError as exc:
         print(f"Не удалось обновить профиль бота: {exc}")
 
     print("Бот запущен. Остановить: Ctrl+C")
     print(settings.mini_app_status)
+    url_task = asyncio.create_task(watch_base_url(), name="tunnel-watch")
     try:
         await dispatcher.start_polling(bot)
     finally:
+        url_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await url_task
         await bot.session.close()
 
 

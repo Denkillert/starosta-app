@@ -122,5 +122,41 @@ settings = Settings()
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 (BASE_DIR / "data").mkdir(parents=True, exist_ok=True)
 
+
+def read_env_value(name: str, path: Path | None = None) -> str | None:
+    """Значение `KEY=...` прямо из .env.
+
+    Нужен для WEB_BASE_URL: адрес туннеля меняется на ходу, и сторожа
+    (`tools/tunnel-watch.ps1`) переписывают .env у уже запущенных процессов.
+    """
+    env_path = path or (BASE_DIR / ".env")
+    try:
+        text = env_path.read_text(encoding="utf-8-sig")
+    except (OSError, UnicodeDecodeError):
+        return None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == name:
+            value = value.strip().strip('"').strip("'")
+            return value or None
+    return None
+
+
+def refresh_web_base_url(path: Path | None = None) -> bool:
+    """Перечитывает WEB_BASE_URL из .env. True — адрес изменился.
+
+    localhost.run на бесплатном тарифе регулярно выдаёт новый домен, при этом
+    ssh.exe и веб-сервер продолжают работать. Без перечитывания .env бот и
+    страницы остаются со ссылкой на уже удалённый туннель.
+    """
+    value = read_env_value("WEB_BASE_URL", path)
+    if not value or value == settings.web_base_url:
+        return False
+    settings.web_base_url = value
+    return True
+
 # Явно пишем в консоль при импорте, чтобы было видно, в каком режиме стартует.
 print(f"[config] {settings.mini_app_status}")

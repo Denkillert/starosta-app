@@ -1,17 +1,12 @@
 """Печатные ведомости: пропуски за месяц и платные отработки."""
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from datetime import date
 from io import BytesIO
 
-from docx import Document as DocxDocument
-from docx.enum.section import WD_ORIENT
-from docx.enum.table import WD_ALIGN_VERTICAL, WD_ROW_HEIGHT_RULE
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Pt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,6 +15,7 @@ from ..constants import DocStatus, DocType
 from ..models import Document, Group
 from ..utils import course_for_code, format_date_short, short_name
 from . import attendance as attendance_service
+from . import docx_kit
 
 RU_MONTHS_NOM = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
@@ -35,6 +31,15 @@ VISIBLE_DOC_STATUSES = {
     DocType.ORDER: {DocStatus.ACTIVE, DocStatus.APPROVED},
     DocType.STATEMENT: {DocStatus.PENDING, DocStatus.APPROVED, DocStatus.ACTIVE},
 }
+
+# Бланк рассчитан на 31 день: колонки 1..31 есть всегда, лишние остаются пустыми.
+PROPUSKI_DAYS = 31
+# Первая колонка с отметкой дня и последние колонки ИТОГО / По уваж. / Безуваж.
+PROPUSKI_FIRST_DAY_CELL = 3
+PROPUSKI_TOTAL_CELL = 34
+# Сколько пустых строк оставляем в бланках, если документов/отработок меньше.
+DOCS_MIN_ROWS = 13
+PAID_WORK_MIN_ROWS = 33
 
 @dataclass(slots=True)
 class DocumentLine:
@@ -148,7 +153,8 @@ def _document_period(document: Document) -> str:
         return "—"
     if end is None or start == end:
         return format_date_short(start)
-    return f"{format_date_short(start)} - {format_date_short(end)}"
+    # В бланке диапазон пишут без пробелов вокруг тире — иначе не влезает в колонку.
+    return f"{format_date_short(start)}-{format_date_short(end)}"
 
 
 def _overlaps(document: Document, first: date, last: date) -> bool:
@@ -283,211 +289,51 @@ def paid_report(db: Session, group: Group, year: int, month: int) -> PaidReport:
 
 
 # --------------------------------------------------------------------------- #
-# DOCX Generation Helpers
+# DOCX: ведомость пропусков
 # --------------------------------------------------------------------------- #
 
-CM_PER_TWIP = 1 / 567  # 1 см = 567 twips
-TWIPS_PER_CM = 567
-
-
-def _new_document(*, margins=(1.27, 1.27, 0.75, 0.5), base_size: int = 10) -> DocxDocument:
-    """A4 книжная, поля как в ведомостях вуза."""
-    document = DocxDocument()
-    section = document.sections[0]
-    section.orientation = WD_ORIENT.PORTRAIT
-    section.page_width = Cm(21)
-    section.page_height = Cm(29.7)
-    left, right, top, bottom = margins
-    section.left_margin = Cm(left)
-    section.right_margin = Cm(right)
-    section.top_margin = Cm(top)
-    section.bottom_margin = Cm(bottom)
-
-    style = document.styles["Normal"]
-    style.font.name = "Calibri"
-    style.font.size = Pt(base_size)
-    rpr = style.element.get_or_add_rPr()
-    rfonts = rpr.get_or_add_rFonts()
-    rfonts.set(qn("w:eastAsia"), "Calibri")
-    rfonts.set(qn("w:cs"), "Calibri")
-    return document
-
-
-def _content_width(section) -> float:
-    return (section.page_width - section.left_margin - section.right_margin) / 360000
-
-
-def _paragraph(
-    document,
-    text: str = "",
-    *,
-    size: int = 10,
-    bold: bool = False,
-    italic: bool = False,
-    font: str = "Calibri",
-    align=WD_ALIGN_PARAGRAPH.CENTER,
-    space_before: float = 0,
-    space_after: float = 0,
-):
-    paragraph = document.add_paragraph()
-    paragraph.alignment = align
-    paragraph.paragraph_format.space_before = Pt(space_before)
-    paragraph.paragraph_format.space_after = Pt(space_after)
-    run = paragraph.add_run(text)
-    run.bold = bold
-    run.italic = italic
-    run.font.size = Pt(size)
-    run.font.name = font
-    return paragraph
-
-
-def _title(document, text: str, *, size: int = 12) -> None:
-    _paragraph(document, text, size=size, bold=True, italic=True)
-
-
-def _subtitle(document, text: str, *, size: int = 12, bold: bool = True) -> None:
-    _paragraph(document, text, size=size, bold=bold, italic=bold)
-
-
-def _caption(document, text: str, *, size: int = 9) -> None:
-    _paragraph(
-        document,
-        text,
-        size=size,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-        space_before=4,
-    )
-
-
-def _cell(
-    cell,
-    text,
-    *,
-    bold: bool = False,
-    italic: bool = False,
-    size: float = 8,
-    font: str = "Calibri",
-    align=WD_ALIGN_PARAGRAPH.CENTER,
-) -> None:
-    cell.text = ""
-    paragraph = cell.paragraphs[0]
-    paragraph.alignment = align
-    paragraph.paragraph_format.space_before = Pt(0)
-    paragraph.paragraph_format.space_after = Pt(0)
-    run = paragraph.add_run("" if text is None else str(text))
-    run.bold = bold
-    run.italic = italic
-    run.font.size = Pt(size)
-    run.font.name = font
-    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-
-
-def _cell_multiline(
-    cell,
-    lines: list[str],
-    *,
-    bold: bool = False,
-    italic: bool = False,
-    size: float = 7,
-    font: str = "Arial",
-    align=WD_ALIGN_PARAGRAPH.CENTER,
-) -> None:
-    """Несколько абзацев в одной ячейке — как в бланке вуза."""
-    cell.text = ""
-    for index, line in enumerate(lines):
-        paragraph = cell.paragraphs[0] if index == 0 else cell.add_paragraph()
-        paragraph.alignment = align
-        paragraph.paragraph_format.space_before = Pt(0)
-        paragraph.paragraph_format.space_after = Pt(0)
-        run = paragraph.add_run(line)
-        run.bold = bold
-        run.italic = italic
-        run.font.size = Pt(size)
-        run.font.name = font
-    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-
-
-def _table(document, rows: int, cols: int, widths: list[float]):
-    """Таблица с фиксированными ширинами колонок (в см)."""
-    table = document.add_table(rows=rows, cols=cols)
-    table.style = "Table Grid"
-    table.autofit = False
-
-    # Фиксированная раскладка: Word не будет пересчитывать ширины сам.
-    tbl_pr = table._tbl.tblPr
-    layout = OxmlElement("w:tblLayout")
-    layout.set(qn("w:type"), "fixed")
-    tbl_pr.append(layout)
-
-    # Узкие внутренние отступы — иначе 31 колонка не помещается.
-    margins = OxmlElement("w:tblCellMar")
-    for side, value in (("top", 0), ("left", 15), ("bottom", 0), ("right", 15)):
-        element = OxmlElement(f"w:{side}")
-        element.set(qn("w:w"), str(value))
-        element.set(qn("w:type"), "dxa")
-        margins.append(element)
-    tbl_pr.append(margins)
-
-    grid = table._tbl.tblGrid.findall(qn("w:gridCol"))
-    for grid_col, width in zip(grid, widths):
-        grid_col.set(qn("w:w"), str(round(width * TWIPS_PER_CM)))
-    for row in table.rows:
-        for index, width in enumerate(widths):
-            row.cells[index].width = Cm(width)
-    return table
-
-
-def _new_row(table, widths: list[float], *, height: float = 0.42) -> list:
-    row = table.add_row()
-    row.height = Cm(height)
-    row.height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
-    for index, width in enumerate(widths):
-        row.cells[index].width = Cm(width)
-    return row.cells
-
-
-def _keep_row(row) -> None:
-    """Запрещает перенос строки таблицы на следующую страницу."""
-    tr_pr = row._tr.get_or_add_trPr()
-    if tr_pr.find(qn("w:cantSplit")) is None:
-        tr_pr.append(OxmlElement("w:cantSplit"))
+FUNDING_SHORT = {"budget": "Б", "paid": "П"}
 
 
 def _money(value: float) -> str:
     return f"{value:.2f}".replace(".", ",")
 
 
-def _fixed_widths(content: float, fixed: tuple[float, ...], tail: tuple[float, ...], count: int) -> list[float]:
-    """Ширины колонок: фиксированные + одинаковые дни + итоговые."""
-    day = (content - sum(fixed) - sum(tail)) / max(1, count)
-    return [*fixed, *([day] * count), *tail]
+def _order_cell(line: DocumentLine) -> str:
+    return f"№{line.number} {line.period}" if line.number else line.period
 
 
-# --------------------------------------------------------------------------- #
-# Ведомость пропусков
-# --------------------------------------------------------------------------- #
+def _fill_students(table, report: PropuskiReport) -> None:
+    """Основная таблица: № / ФИО / форма обучения / дни 1..31 / итоги."""
+    rows = docx_kit.table_rows(table)
+    if not report.students:
+        return  # в бланке остаётся одна пустая строка
 
-PROPUSKI_FIXED = (0.49, 2.60, 0.70)   # № п/п, ФИО, форма обучения
-PROPUSKI_TAIL = (0.75, 0.80, 0.80)    # ИТОГО, По уваж., Безуваж.
+    prototype = rows[2]
+    docx_kit.drop_rows(table, 2)
+
+    for number, item in enumerate(report.students, start=1):
+        tr = docx_kit.append_row(table, prototype)
+        cells = docx_kit.row_cells(table, tr)
+        docx_kit.set_cell(cells[0], number)
+        docx_kit.set_cell(cells[1], short_name(item.member.full_name))
+        docx_kit.set_cell(cells[2], FUNDING_SHORT.get(item.member.funding, "Б"))
+        for day in range(1, PROPUSKI_DAYS + 1):
+            hours = item.days.get(day) if day <= report.days else None
+            docx_kit.set_cell(cells[PROPUSKI_FIRST_DAY_CELL + day - 1], hours or "")
+        docx_kit.set_cell(cells[PROPUSKI_TOTAL_CELL], item.total_hours)
+        docx_kit.set_cell(cells[PROPUSKI_TOTAL_CELL + 1], item.excused_hours or "")
+        docx_kit.set_cell(cells[PROPUSKI_TOTAL_CELL + 2], item.absent_hours or "")
 
 
-def _documents_table(document, report: PropuskiReport) -> None:
-    content = _content_width(document.sections[0])
-    widths = [content * share for share in (0.163, 0.157, 0.163, 0.146, 0.163, 0.208)]
-    table = _table(document, rows=2, cols=6, widths=widths)
+def _fill_documents(table, report: PropuskiReport) -> None:
+    """Таблица справок, заявлений и распоряжений."""
+    rows = docx_kit.table_rows(table)
+    prototype = rows[2]
+    docx_kit.drop_rows(table, 2)
 
-    _cell(table.cell(0, 0).merge(table.cell(0, 1)), "Справки", bold=True, size=8)
-    _cell(table.cell(0, 2).merge(table.cell(0, 3)), "Заявления", bold=True, size=8)
-    _cell(table.cell(0, 4).merge(table.cell(0, 5)), "Распоряжения", bold=True, size=8)
-
-    headers = ("Ф.И.О.", "Дата", "Ф.И.О.", "Дата", "Ф.И.О.", "Номер и дата")
-    for index, label in enumerate(headers):
-        _cell(table.cell(1, index), label, bold=True, size=8)
-        _keep_row(table.rows[1])
-
-    # Пустые строки оставляем, чтобы бланк можно было заполнять от руки.
-    rows_count = max(
-        14,
+    row_count = max(
+        DOCS_MIN_ROWS,
         len(report.certificates),
         len(report.statements),
         len(report.orders),
@@ -498,181 +344,55 @@ def _documents_table(document, report: PropuskiReport) -> None:
         (report.orders, 4),
     )
 
-    for index in range(rows_count):
-        cells = _new_row(table, widths)
-        for lines, column in blocks:
+    for index in range(row_count):
+        tr = docx_kit.append_row(table, prototype)
+        cells = docx_kit.row_cells(table, tr)
+        for lines, offset in blocks:
             line = lines[index] if index < len(lines) else None
-            _cell(
-                cells[column],
-                line.student if line else "",
-                size=8,
-                align=WD_ALIGN_PARAGRAPH.LEFT,
-            )
             if line is None:
-                value = ""
-            elif column == 4:
-                value = f"{line.period} №{line.number or '___'}"
+                docx_kit.set_cell(cells[offset], "")
+                docx_kit.set_cell(cells[offset + 1], "")
+                continue
+            docx_kit.set_cell(cells[offset], line.student)
+            if offset == 4:
+                docx_kit.set_cell(cells[offset + 1], _order_cell(line))
             else:
-                value = line.period
-            _cell(cells[column + 1], value, size=8)
+                docx_kit.set_cell(cells[offset + 1], line.period)
 
 
-def _paid_work_table(document, report: PropuskiReport) -> None:
-    course_str = str(report.course) if report.course else "_______"
-    _paragraph(
-        document,
-        "ВЕДОМОСТЬ УЧЕТА ПЛАТНЫХ ОТРАБОТОК ЗА "
-        f"{report.month_name} {report.year} г., курс {course_str} "
-        f"Группа {report.group.code}",
-        size=10,
-        bold=True,
-        space_before=10,
-        space_after=4,
-    )
+def _fill_paid_work(table, report: PropuskiReport) -> None:
+    """Нижняя таблица второй страницы: кто и сколько часов отрабатывает."""
+    rows = docx_kit.table_rows(table)
+    prototype = rows[1]
+    docx_kit.drop_rows(table, 1)
 
-    content = _content_width(document.sections[0])
-    widths = [content * 0.33, content * 0.55, content * 0.12]
-    table = _table(document, rows=1, cols=3, widths=widths)
-    for index, label in enumerate(
-        ("Ф.И.О. студента", "Дисциплина", "Количество часов отработки")
-    ):
-        _cell(table.rows[0].cells[index], label, bold=True, size=9)
-
-    if not report.paid_work:
-        cells = _new_row(table, widths, height=0.6)
-        _cell(cells[0], "—", size=9)
-        _cell(
-            cells[1],
-            "Пропусков без уважительной причины нет",
-            size=9,
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-        )
-        _cell(cells[2], "", size=9)
-        return
-
-    for line in report.paid_work:
-        cells = _new_row(table, widths, height=0.6)
-        _cell(cells[0], line.student, size=9, align=WD_ALIGN_PARAGRAPH.LEFT)
-        _cell(cells[1], line.subject, size=9, align=WD_ALIGN_PARAGRAPH.LEFT)
-        _cell(cells[2], line.hours, size=9)
-
-
-def _signatures(document) -> None:
-    _paragraph(document, "", size=8, space_before=6)
-    for label in ("Дата                _______________",):
-        _paragraph(document, label, size=10, align=WD_ALIGN_PARAGRAPH.LEFT)
-    _paragraph(
-        document,
-        "Староста:      _______________        ___________________",
-        size=10,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-    )
-    _paragraph(
-        document,
-        " " * 45 + "(Ф.И.О.)",
-        size=9,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-    )
-    _paragraph(
-        document,
-        "Куратор:         _______________        ___________________",
-        size=10,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-    )
-    _paragraph(
-        document,
-        " " * 45 + "(Ф.И.О.)",
-        size=9,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-    )
+    row_count = max(PAID_WORK_MIN_ROWS, len(report.paid_work))
+    for index in range(row_count):
+        tr = docx_kit.append_row(table, prototype)
+        cells = docx_kit.row_cells(table, tr)
+        line = report.paid_work[index] if index < len(report.paid_work) else None
+        docx_kit.set_cell(cells[0], line.student if line else "")
+        docx_kit.set_cell(cells[1], line.subject if line else "")
+        docx_kit.set_cell(cells[2], line.hours if line else "")
 
 
 def render_propuski(report: PropuskiReport) -> bytes:
-    document = _new_document(margins=(1.27, 1.27, 0.75, 0.5), base_size=10)
-
-    _title(document, "ВЕДОМОСТЬ")
-    _title(document, "учета учебных часов, пропущенных студентами")
-    _title(document, f"за {report.month_name.lower()} месяц {report.year} г.")
-    course = str(report.course) if report.course else "_______"
-    # Пробелы как в бланке: подписи стоят над своими полями.
-    _paragraph(
+    """Ведомость пропусков: страница отметок + страница платных отработок."""
+    document = docx_kit.open_template("propuski.docx")
+    course = str(report.course) if report.course else " "
+    docx_kit.replace_tokens(
         document,
-        f"Курс       {course}       ГРУППА         {report.group.code}          .",
-        size=12,
-        bold=True,
-        italic=True,
-        align=WD_ALIGN_PARAGRAPH.LEFT,
-    )
-    _paragraph(document, "", size=8)
-
-    days = report.days
-    content = _content_width(document.sections[0])
-    widths = _fixed_widths(content, PROPUSKI_FIXED, PROPUSKI_TAIL, days)
-    cols = 3 + days + 3
-    table = _table(document, rows=2, cols=cols, widths=widths)
-    for row in table.rows:
-        _keep_row(row)
-    table.rows[0].height = Cm(0.41)
-    table.rows[1].height = Cm(1.54)
-    table.rows[1].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
-
-    merged = table.cell(0, 0).merge(table.cell(1, 0))
-    _cell(merged, "№ п/п", bold=True, italic=True, size=7, font="Arial")
-
-    # В бланке вуза в этой ячейке сверху осталось слово «Дата», снизу — «ФИО».
-    merged = table.cell(0, 1).merge(table.cell(1, 1))
-    _cell_multiline(merged, ["", "Дата", "", "", "ФИО"])
-
-    merged = table.cell(0, 2).merge(table.cell(1, 2))
-    _cell_multiline(
-        merged, ["форма", "обучения", "(бюджет/платно)"], bold=True, italic=True
+        {
+            "MONTH": report.month_name.lower(),
+            "YEAR": report.year,
+            "COURSE": course,
+            "GROUP": report.group.code,
+        },
     )
 
-    for offset in range(days):
-        column = 3 + offset
-        merged = table.cell(0, column).merge(table.cell(1, column))
-        _cell(merged, offset + 1, bold=True, italic=True, size=7, font="Arial")
-
-    total_col = 3 + days
-    merged = table.cell(0, total_col).merge(table.cell(1, total_col))
-    _cell(merged, "ИТОГО", bold=True, italic=True, size=7, font="Arial")
-
-    top = table.cell(0, total_col + 1).merge(table.cell(0, total_col + 2))
-    _cell(top, "", size=7, font="Arial")
-    _cell(table.cell(1, total_col + 1), "По уваж.", bold=True, italic=True, size=7, font="Arial")
-    _cell(table.cell(1, total_col + 2), "Безуваж.", bold=True, italic=True, size=7, font="Arial")
-
-    funding_short = {"budget": "Б", "paid": "П"}
-    for number, item in enumerate(report.students, start=1):
-        row = _new_row(table, widths)
-        _cell(row[0], number, size=7, font="Arial", bold=True, italic=True)
-        _cell(
-            row[1],
-            short_name(item.member.full_name),
-            size=10,
-            italic=True,
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-        )
-        _cell(row[2], funding_short.get(item.member.funding, "Б"), size=10, italic=True)
-        for day in range(1, days + 1):
-            _cell(row[2 + day], item.days.get(day) or "", size=10, italic=True)
-        _cell(row[total_col], item.total_hours or "", size=10, italic=True)
-        _cell(row[total_col + 1], item.excused_hours or "", size=10, italic=True)
-        _cell(row[total_col + 2], item.absent_hours or "", size=10, italic=True)
-
-    if not report.students:
-        row = _new_row(table, widths, height=0.6)
-        _cell(row[0], "—", size=8)
-        _cell(row[1], "В группе пока нет студентов", size=9, align=WD_ALIGN_PARAGRAPH.LEFT)
-        for column in range(2, cols):
-            _cell(row[column], "", size=7)
-
-    _paragraph(document, "", size=8)
-    _documents_table(document, report)
-    _paragraph(document, "", size=8)
-    _signatures(document)
-    _paid_work_table(document, report)
-    _signatures(document)
+    _fill_students(document.tables[0], report)
+    _fill_documents(document.tables[1], report)
+    _fill_paid_work(document.tables[2], report)
 
     buffer = BytesIO()
     document.save(buffer)
@@ -680,139 +400,66 @@ def render_propuski(report: PropuskiReport) -> bytes:
 
 
 # --------------------------------------------------------------------------- #
-# Ведомость платных отработок по дисциплине
+# DOCX: ведомость платных отработок по дисциплине
 # --------------------------------------------------------------------------- #
 
-# Ширины колонок из бланка вуза (в twips), 13 колонок.
-PAID_BASE_WIDTHS = (
-    933, 855, 1343, 1009, 263, 576, 697, 94, 225, 1056, 965, 514, 1961,
-)
+PAID_HEADER_ROWS = 6   # шапка бланка
 
 
-def _paid_layout(document) -> list[float]:
-    content = _content_width(document.sections[0])
-    widths = [value * CM_PER_TWIP for value in PAID_BASE_WIDTHS]
-    scale = content / sum(widths)
-    return [width * scale for width in widths]
-
-
-def _paid_header(table, group: PaidGroup, month_name: str, code: str) -> None:
-    """Шапка бланка: 6 строк с объединёнными ячейками."""
-
-    def merge(row: int, start: int, end: int, text, **kwargs) -> None:
-        cell = table.cell(row, start)
-        if end > start:
-            cell = cell.merge(table.cell(row, end))
-        _cell(cell, text, font="Calibri", **kwargs)
-
-    merge(0, 0, 5, group.subject, size=12)
-    merge(0, 6, 6, "", size=12)
-    merge(0, 7, 12, group.teacher, size=12)
-
-    merge(1, 0, 5, "название дисциплины", size=9)
-    merge(1, 6, 6, "", size=9)
-    merge(1, 7, 12, "ФИО преподавателя", size=9)
-
-    merge(2, 0, 1, "за", size=10, align=WD_ALIGN_PARAGRAPH.LEFT)
-    merge(2, 2, 3, month_name, size=10)
-    merge(2, 4, 8, "группы", size=10)
-    merge(2, 9, 10, code, size=10)
-    merge(2, 11, 12, "", size=10)
-
-    merge(3, 0, 1, "", size=9)
-    merge(3, 2, 3, "месяц", size=9)
-    for start, end in ((4, 8), (9, 10), (11, 12)):
-        merge(3, start, end, "", size=9)
-
-    merge(4, 0, 0, "№ п/п", bold=True, size=11)
-    merge(4, 1, 2, "ФИО студента полностью", bold=True, size=11)
-    merge(4, 3, 4, "Дата пропуска занятия", bold=True, size=11)
-    merge(4, 5, 7, "Сумма к оплате*, руб", bold=True, size=11)
-    merge(4, 8, 9, "Номер операции в ЕРИП", bold=True, size=11)
-    merge(4, 10, 11, "Дата совершения оплаты", bold=True, size=11)
-    merge(4, 12, 12, "Подпись преподавателя об отработке/дата сдачи", bold=True, size=11)
-
-    merge(5, 0, 0, 1, bold=True, size=11)
-    merge(5, 1, 2, 2, bold=True, size=11)
-    merge(5, 3, 4, 3, bold=True, size=11)
-    merge(5, 5, 7, 4, bold=True, size=11)
-    merge(5, 8, 9, 5, bold=True, size=11)
-    merge(5, 10, 11, 6, bold=True, size=11)
-    merge(5, 12, 12, 7, bold=True, size=11)
+def _paid_page(template, page_break, blocks: list) -> None:
+    """Вставляет на страницу блок бланка (заголовок, таблица, сноска)."""
+    section = template.element.body.find(qn("w:sectPr"))
+    if page_break is not None:
+        section.addprevious(copy.deepcopy(page_break))
+    for block in blocks:
+        section.addprevious(copy.deepcopy(block))
 
 
 def render_paid(report: PaidReport) -> bytes:
-    document = _new_document(margins=(3.0, 1.5, 2.0, 2.0), base_size=10)
-    widths = _paid_layout(document)
+    """Ведомость платных отработок: по одной странице на дисциплину."""
+    document = docx_kit.open_template("paid.docx")
+    body = document.element.body
+    section = body.find(qn("w:sectPr"))
+    blocks = [child for child in body.iterchildren() if child is not section]
+    for child in blocks:
+        body.remove(child)
 
-    if not report.groups:
-        _paragraph(
-            document,
-            "Ведомость учета платных отработок по дисциплине",
-            size=11,
-            space_after=6,
-        )
-        _paragraph(
-            document,
-            f"за {report.month_name} {report.year} г. группы {report.group.code}",
-            size=10,
-            space_after=6,
-        )
-        _paragraph(
-            document,
-            "Пропусков занятий без уважительной причины за месяц нет.",
-            size=10,
-            align=WD_ALIGN_PARAGRAPH.LEFT,
-        )
-        buffer = BytesIO()
-        document.save(buffer)
-        return buffer.getvalue()
+    page = blocks[:-1]
+    page_break = blocks[-1]
+    groups = report.groups or [None]
 
-    for index, group in enumerate(report.groups):
-        if index:
-            document.add_page_break()
+    for index in range(len(groups)):
+        _paid_page(document, page_break if index else None, page)
 
-        _paragraph(
-            document,
-            "Ведомость учета платных отработок по дисциплине",
-            size=11,
-            space_after=6,
-        )
+    for group, table in zip(groups, document.tables):
+        rows = docx_kit.table_rows(table)
+        head = docx_kit.row_cells(table, rows[0])
+        docx_kit.set_cell(head[0], group.subject if group else "")
+        docx_kit.set_cell(head[2], group.teacher if group else "")
 
-        # Пустые строки — как в бланке: ведомость заполняют и от руки.
-        rows = 6 + max(20, len(group.entries))
-        table = _table(document, rows=rows, cols=13, widths=widths)
-        _paid_header(table, group, report.month_name, report.group.code)
-        for row in table.rows[:6]:
-            _keep_row(row)
-            row.height = Cm(0.5)
+        date_row = docx_kit.row_cells(table, rows[2])
+        docx_kit.set_cell(date_row[1], report.month_name)
+        docx_kit.set_cell(date_row[3], report.group.code)
 
-        for index in range(rows - 6):
-            entry = group.entries[index] if index < len(group.entries) else None
-            cells = table.rows[6 + index].cells
-            _cell(cells[0], f"{index + 1}." if entry else "", size=10)
-            merged = cells[1].merge(cells[2])
-            _cell(
-                merged,
-                entry.member.full_name if entry else "",
-                size=10,
-                align=WD_ALIGN_PARAGRAPH.LEFT,
-            )
-            merged = cells[3].merge(cells[4])
-            _cell(merged, format_date_short(entry.day) if entry else "", size=10)
-            merged = cells[5].merge(cells[7])
-            _cell(merged, _money(entry.amount) if entry else "", size=10)
-            merged = cells[8].merge(cells[9])
-            _cell(merged, "", size=10)
-            merged = cells[10].merge(cells[11])
-            _cell(merged, "", size=10)
-            _cell(cells[12], "", size=10)
+        data_rows = rows[PAID_HEADER_ROWS:]
+        entries = group.entries if group else []
+        donor = docx_kit.row_cells(table, data_rows[0])[1]
+        while len(data_rows) < len(entries):
+            data_rows.append(docx_kit.append_row(table, data_rows[-1]))
 
-        _caption(
-            document,
-            "*Если занятие пропущено по уважительной причине, "
-            "делается отметка «без оплаты»",
-        )
+        for index, tr in enumerate(data_rows):
+            cells = docx_kit.row_cells(table, tr)
+            entry = entries[index] if index < len(entries) else None
+            if entry is None:
+                for cell in cells:
+                    docx_kit.set_cell(cell, "")
+                continue
+            docx_kit.set_cell(cells[0], f"{index + 1}.", donor=donor)
+            docx_kit.set_cell(cells[1], entry.member.full_name, donor=donor)
+            docx_kit.set_cell(cells[2], format_date_short(entry.day), donor=donor)
+            docx_kit.set_cell(cells[3], _money(entry.amount), donor=donor)
+            for cell in cells[4:]:
+                docx_kit.set_cell(cell, "")
 
     buffer = BytesIO()
     document.save(buffer)

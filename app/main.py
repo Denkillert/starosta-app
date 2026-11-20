@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from .config import BASE_DIR, settings
 from .db import init_db
 from .routers import api, web
-from .services import scheduler
+from .services import scheduler, tunnel
 from .web import templates
 
 STATIC_DIR = BASE_DIR / "app" / "static"
@@ -25,13 +25,16 @@ async def lifespan(_app: FastAPI):
     if settings.scheduler_enabled:
         task = asyncio.create_task(scheduler.loop(), name="schedule-sync")
         task.add_done_callback(_scheduler_done)
+    # Адрес туннеля живёт в .env: сторож может сменить его на ходу.
+    url_task = asyncio.create_task(tunnel.watch_base_url(), name="tunnel-watch")
     try:
         yield
     finally:
-        if task is not None:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+        for pending in (task, url_task):
+            if pending is not None:
+                pending.cancel()
+                with suppress(asyncio.CancelledError):
+                    await pending
 
 
 def _scheduler_done(task: asyncio.Task) -> None:
