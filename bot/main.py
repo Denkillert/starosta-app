@@ -31,12 +31,13 @@ from sqlalchemy import func, select
 from app.config import settings
 from app.constants import AttendanceStatus, DocStatus, DocType, OccurrenceStatus, Role
 from app.db import SessionLocal, init_db
-from app.models import Attendance, Group
+from app.models import Attendance, Group, Membership, User
 from app.services import attendance as attendance_service
 from app.services import documents as documents_service
 from app.services import schedule as schedule_service
 from app.services import schedule_sync
 from app.services.groups import GroupError, ensure_user, join_by_invite, membership_for_telegram
+from app.services.notify import notify_staff_join
 from app.utils import today_local
 
 router = Router()
@@ -102,17 +103,35 @@ def _app_hint() -> str:
     )
 
 
-def _join_job(telegram_id: int, full_name: str, username: str | None, code: str) -> tuple[bool, str]:
+def _join_job(
+    telegram_id: int, full_name: str, username: str | None, code: str
+) -> tuple[bool, str, tuple[int, int, int] | None]:
     with SessionLocal() as db:
         user = ensure_user(
             db, telegram_id=telegram_id, full_name=full_name, username=username
         )
         db.commit()
         try:
-            group, _membership = join_by_invite(db, user=user, invite_code=code)
+            group, membership = join_by_invite(db, user=user, invite_code=code)
         except GroupError as exc:
-            return False, str(exc)
-        return True, f"Вы присоединились к группе <b>{html.escape(group.code)}</b>."
+            return False, str(exc), None
+        pending = (
+            (group.id, membership.id, user.id) if membership.needs_review else None
+        )
+        return True, f"Вы присоединились к группе <b>{html.escape(group.code)}</b>.", pending
+
+
+async def _notify_staff_about_join(pending: tuple[int, int, int] | None) -> None:
+    """Сообщает старосте о заявке, не задерживая ответ студенту."""
+    if pending is None:
+        return
+    group_id, membership_id, user_id = pending
+    with SessionLocal() as db:
+        group = db.get(Group, group_id)
+        membership = db.get(Membership, membership_id)
+        user = db.get(User, user_id)
+        if group is not None and membership is not None:
+            await notify_staff_join(db, group, membership, user)
 
 
 def _day_text(group_id: int, day, title: str) -> str:
@@ -298,9 +317,10 @@ def _sync_job(group_id: int, term: int, telegram_id: int) -> str:
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject) -> None:
     joined = ""
+    pending = None
     code = (command.args or "").strip()
     if code:
-        _ok, text = await asyncio.to_thread(
+        _ok, text, pending = await asyncio.to_thread(
             _join_job,
             message.from_user.id,
             message.from_user.full_name,
@@ -334,6 +354,9 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
         "/help — помощь"
     ) + _app_hint()
     await message.answer(text, reply_markup=_app_keyboard())
+    # Сообщение старосте — после ответа студенту: сеть Telegram не должна
+    # задерживать /start.
+    await _notify_staff_about_join(pending)
 
 
 @router.message(Command("help"))
@@ -485,7 +508,7 @@ async def fallback(message: Message) -> None:
         and 4 <= len(text) <= 12
         and set(text) <= INVITE_ALPHABET
     ):
-        ok, answer = await asyncio.to_thread(
+        ok, answer, pending = await asyncio.to_thread(
             _join_job,
             message.from_user.id,
             message.from_user.full_name,
@@ -494,6 +517,7 @@ async def fallback(message: Message) -> None:
         )
         if ok:
             await message.answer(answer, reply_markup=_app_keyboard())
+            await _notify_staff_about_join(pending)
         else:
             await message.answer(answer)
         return

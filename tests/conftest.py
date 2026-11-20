@@ -20,6 +20,8 @@ from app.services.schedule_sync import import_parsed
 # Фоновый цикл не должен запускаться в тестах: он ходит в сеть и мешает
 # предсказуемому завершению TestClient.
 settings.scheduler_enabled = False
+# Тесты не должны отправлять сообщения в Telegram, даже если в .env есть токен.
+settings.notify_staff_on_join = False
 
 ROOT = Path(__file__).resolve().parent.parent
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

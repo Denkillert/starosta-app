@@ -140,7 +140,13 @@ def join_by_invite(db: Session, *, user: User, invite_code: str) -> tuple[Group,
     if existing:
         if existing.status != MemberStatus.ACTIVE:
             existing.status = MemberStatus.ACTIVE
-        if user.full_name and existing.full_name != user.full_name:
+        # Имя из Telegram обновляем только у непроверенной заявки: иначе
+        # повторный вход по ссылке затирал бы ФИО, которое дал староста.
+        if (
+            existing.needs_review
+            and user.full_name
+            and existing.full_name != user.full_name
+        ):
             existing.full_name = user.full_name
         db.commit()
         return group, existing

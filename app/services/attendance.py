@@ -152,6 +152,9 @@ def roster(db: Session, group_id: int) -> list[Membership]:
             .where(
                 Membership.group_id == group_id,
                 Membership.status == MemberStatus.ACTIVE,
+                # Заявки по коду приглашения не считаются студентами, пока
+                # староста не проверит ФИО и подгруппу.
+                Membership.needs_review.is_(False),
             )
             .order_by(role_order, Membership.full_name)
         ).all()

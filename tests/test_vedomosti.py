@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from datetime import time
+from datetime import date, time
+from io import BytesIO
+from types import SimpleNamespace
 
 import pytest
+from docx import Document as DocxDocument
+from docx.oxml.ns import qn
 from sqlalchemy import select
 
 from app.constants import AttendanceStatus, DocStatus, DocType
@@ -138,3 +142,91 @@ def test_order_time_window_skips_uncovered_lessons(db, seeded):
         )
     ).all()
     assert rows == []
+
+
+def _grid(table) -> list[int]:
+    return [
+        int(column.get(qn("w:w")))
+        for column in table._tbl.tblGrid.findall(qn("w:gridCol"))
+    ]
+
+
+def _spans(table, row_index: int) -> list[int]:
+    spans = []
+    for cell in table.rows[row_index]._tr.findall(qn("w:tc")):
+        grid_span = cell.tcPr.find(qn("w:gridSpan")) if cell.tcPr is not None else None
+        spans.append(int(grid_span.get(qn("w:val"))) if grid_span is not None else 1)
+    return spans
+
+
+def test_docx_reports_match_university_layout():
+    group = SimpleNamespace(id=1, code="24ИТ-2")
+    member = SimpleNamespace(full_name="Гриценяк Кирилл Вадимович", funding="budget")
+
+    propuski = vedomosti.PropuskiReport(
+        group=group,
+        year=2025,
+        month=10,
+        first=date(2025, 10, 1),
+        last=date(2025, 10, 31),
+        course=3,
+        students=[
+            SimpleNamespace(
+                member=member,
+                days={6: 4},
+                total_hours=4,
+                excused_hours=2,
+                absent_hours=2,
+            )
+        ],
+        certificates=[vedomosti.DocumentLine("Потапейко А.Д.", "14.10.2025")],
+        statements=[vedomosti.DocumentLine("Демидовец А.А.", "16.10.2025")],
+        orders=[vedomosti.DocumentLine("Седляр Я.Ф.", "02.10.2025", "185")],
+        paid_work=[vedomosti.PaidWorkLine(member.full_name, "Физика", 2)],
+    )
+    document = DocxDocument(BytesIO(vedomosti.render_propuski(propuski)))
+
+    assert len(document.tables) == 3
+    main, documents, paid = document.tables
+    # 3 фиксированные колонки + 31 день + ИТОГО/По уваж./Безуваж.
+    assert len(_grid(main)) == 37
+    assert _spans(main, 0)[-1] == 2
+    assert _spans(documents, 0) == [2, 2, 2]
+    assert _spans(documents, 1) == [1, 1, 1, 1, 1, 1]
+    assert len(_grid(documents)) == 6
+    assert len(_grid(paid)) == 3
+    assert documents.rows[2].cells[0].text == "Потапейко А.Д."
+
+    paid_report = vedomosti.PaidReport(
+        group=group,
+        year=2025,
+        month=10,
+        course=3,
+        groups=[
+            vedomosti.PaidGroup(
+                subject="Физическая культура",
+                teacher="Снитко Алина Николаевна",
+                entries=[
+                    vedomosti.PaidRow(
+                        member=member,
+                        day=date(2025, 10, 6),
+                        kind="lab",
+                        hours=2,
+                        amount=18.47,
+                    )
+                ],
+            )
+        ],
+    )
+    document = DocxDocument(BytesIO(vedomosti.render_paid(paid_report)))
+    table = document.tables[0]
+    assert len(_grid(table)) == 13
+    assert len(table.rows) == 26
+    assert _spans(table, 0) == [6, 1, 6]
+    assert _spans(table, 1) == [6, 1, 6]
+    assert _spans(table, 2) == [2, 2, 5, 2, 2]
+    assert _spans(table, 4) == [1, 2, 2, 3, 2, 2, 1]
+    assert table.rows[6].cells[0].text == "1."
+    assert table.rows[6].cells[1].text == "Гриценяк Кирилл Вадимович"
+    assert table.rows[6].cells[3].text == "06.10.2025"
+    assert table.rows[6].cells[5].text == "18,47"

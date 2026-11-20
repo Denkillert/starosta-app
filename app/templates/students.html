@@ -135,13 +135,14 @@
   </section>
 {% endif %}
 
+{% set confirmed_members = members|rejectattr('needs_review')|list %}
 <section class="card">
   <div class="card-head">
     <h2 class="card-title">Состав группы</h2>
-    <span class="muted small">{{ members|length }}</span>
+    <span class="muted small">{{ confirmed_members|length }}</span>
   </div>
   <div class="members">
-    {% for member in members %}
+    {% for member in confirmed_members %}
       {% set stat = stats_by_member.get(member.id) %}
       <div class="member {{ 'is-left' if member.status != 'active' }}">
         <div class="member-main">

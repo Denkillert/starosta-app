@@ -382,6 +382,31 @@ def _cell(
     cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
 
 
+def _cell_multiline(
+    cell,
+    lines: list[str],
+    *,
+    bold: bool = False,
+    italic: bool = False,
+    size: float = 7,
+    font: str = "Arial",
+    align=WD_ALIGN_PARAGRAPH.CENTER,
+) -> None:
+    """Несколько абзацев в одной ячейке — как в бланке вуза."""
+    cell.text = ""
+    for index, line in enumerate(lines):
+        paragraph = cell.paragraphs[0] if index == 0 else cell.add_paragraph()
+        paragraph.alignment = align
+        paragraph.paragraph_format.space_before = Pt(0)
+        paragraph.paragraph_format.space_after = Pt(0)
+        run = paragraph.add_run(line)
+        run.bold = bold
+        run.italic = italic
+        run.font.size = Pt(size)
+        run.font.name = font
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+
 def _table(document, rows: int, cols: int, widths: list[float]):
     """Таблица с фиксированными ширинами колонок (в см)."""
     table = document.add_table(rows=rows, cols=cols)
@@ -460,7 +485,13 @@ def _documents_table(document, report: PropuskiReport) -> None:
         _cell(table.cell(1, index), label, bold=True, size=8)
         _keep_row(table.rows[1])
 
-    rows_count = max(1, len(report.certificates), len(report.statements), len(report.orders))
+    # Пустые строки оставляем, чтобы бланк можно было заполнять от руки.
+    rows_count = max(
+        14,
+        len(report.certificates),
+        len(report.statements),
+        len(report.orders),
+    )
     blocks = (
         (report.certificates, 0),
         (report.statements, 2),
@@ -563,9 +594,10 @@ def render_propuski(report: PropuskiReport) -> bytes:
     _title(document, "учета учебных часов, пропущенных студентами")
     _title(document, f"за {report.month_name.lower()} месяц {report.year} г.")
     course = str(report.course) if report.course else "_______"
+    # Пробелы как в бланке: подписи стоят над своими полями.
     _paragraph(
         document,
-        f"Курс {course}       ГРУППА {report.group.code}",
+        f"Курс       {course}       ГРУППА         {report.group.code}          .",
         size=12,
         bold=True,
         italic=True,
@@ -580,12 +612,21 @@ def render_propuski(report: PropuskiReport) -> bytes:
     table = _table(document, rows=2, cols=cols, widths=widths)
     for row in table.rows:
         _keep_row(row)
-        row.height = Cm(0.62)
+    table.rows[0].height = Cm(0.41)
+    table.rows[1].height = Cm(1.54)
+    table.rows[1].height_rule = WD_ROW_HEIGHT_RULE.AT_LEAST
 
-    fixed = ("№ п/п", "ФИО", "форма\nобучения\n(бюджет/платно)")
-    for index, label in enumerate(fixed):
-        merged = table.cell(0, index).merge(table.cell(1, index))
-        _cell(merged, label, bold=True, italic=True, size=7, font="Arial")
+    merged = table.cell(0, 0).merge(table.cell(1, 0))
+    _cell(merged, "№ п/п", bold=True, italic=True, size=7, font="Arial")
+
+    # В бланке вуза в этой ячейке сверху осталось слово «Дата», снизу — «ФИО».
+    merged = table.cell(0, 1).merge(table.cell(1, 1))
+    _cell_multiline(merged, ["", "Дата", "", "", "ФИО"])
+
+    merged = table.cell(0, 2).merge(table.cell(1, 2))
+    _cell_multiline(
+        merged, ["форма", "обучения", "(бюджет/платно)"], bold=True, italic=True
+    )
 
     for offset in range(days):
         column = 3 + offset
@@ -604,14 +645,20 @@ def render_propuski(report: PropuskiReport) -> bytes:
     funding_short = {"budget": "Б", "paid": "П"}
     for number, item in enumerate(report.students, start=1):
         row = _new_row(table, widths)
-        _cell(row[0], number, size=7, font="Arial")
-        _cell(row[1], short_name(item.member.full_name), size=9, italic=True, align=WD_ALIGN_PARAGRAPH.LEFT)
-        _cell(row[2], funding_short.get(item.member.funding, "Б"), size=9)
+        _cell(row[0], number, size=7, font="Arial", bold=True, italic=True)
+        _cell(
+            row[1],
+            short_name(item.member.full_name),
+            size=10,
+            italic=True,
+            align=WD_ALIGN_PARAGRAPH.LEFT,
+        )
+        _cell(row[2], funding_short.get(item.member.funding, "Б"), size=10, italic=True)
         for day in range(1, days + 1):
-            _cell(row[2 + day], item.days.get(day) or "", size=7, font="Arial")
-        _cell(row[total_col], item.total_hours or "", size=7, font="Arial")
-        _cell(row[total_col + 1], item.excused_hours or "", size=7, font="Arial")
-        _cell(row[total_col + 2], item.absent_hours or "", size=7, font="Arial")
+            _cell(row[2 + day], item.days.get(day) or "", size=10, italic=True)
+        _cell(row[total_col], item.total_hours or "", size=10, italic=True)
+        _cell(row[total_col + 1], item.excused_hours or "", size=10, italic=True)
+        _cell(row[total_col + 2], item.absent_hours or "", size=10, italic=True)
 
     if not report.students:
         row = _new_row(table, widths, height=0.6)
@@ -620,7 +667,9 @@ def render_propuski(report: PropuskiReport) -> bytes:
         for column in range(2, cols):
             _cell(row[column], "", size=7)
 
-    document.add_page_break()
+    _paragraph(document, "", size=8)
+    _documents_table(document, report)
+    _paragraph(document, "", size=8)
     _signatures(document)
     _paid_work_table(document, report)
     _signatures(document)
@@ -656,43 +705,40 @@ def _paid_header(table, group: PaidGroup, month_name: str, code: str) -> None:
             cell = cell.merge(table.cell(row, end))
         _cell(cell, text, font="Calibri", **kwargs)
 
-    merge(0, 0, 5, group.subject, size=10)
-    merge(0, 6, 6, "", size=10)
-    merge(0, 7, 12, group.teacher, size=10)
+    merge(0, 0, 5, group.subject, size=12)
+    merge(0, 6, 6, "", size=12)
+    merge(0, 7, 12, group.teacher, size=12)
 
-    merge(1, 0, 5, "название дисциплины", size=8)
-    merge(1, 6, 6, "", size=8)
-    merge(1, 7, 12, "ФИО преподавателя", size=8)
+    merge(1, 0, 5, "название дисциплины", size=9)
+    merge(1, 6, 6, "", size=9)
+    merge(1, 7, 12, "ФИО преподавателя", size=9)
 
     merge(2, 0, 1, "за", size=10, align=WD_ALIGN_PARAGRAPH.LEFT)
     merge(2, 2, 3, month_name, size=10)
-    merge(2, 4, 7, "группы", size=10)
-    merge(2, 8, 9, code, size=10)
-    for column in (10, 11, 12):
-        _cell(table.cell(2, column), "", size=10)
+    merge(2, 4, 8, "группы", size=10)
+    merge(2, 9, 10, code, size=10)
+    merge(2, 11, 12, "", size=10)
 
     merge(3, 0, 1, "", size=9)
     merge(3, 2, 3, "месяц", size=9)
-    merge(3, 4, 7, "", size=9)
-    merge(3, 8, 9, "", size=9)
-    for column in (10, 11, 12):
-        _cell(table.cell(3, column), "", size=9)
+    for start, end in ((4, 8), (9, 10), (11, 12)):
+        merge(3, start, end, "", size=9)
 
-    merge(4, 0, 0, "№ п/п", bold=True, size=9)
-    merge(4, 1, 2, "ФИО студента полностью", bold=True, size=9)
-    merge(4, 3, 4, "Дата пропуска занятия", bold=True, size=9)
-    merge(4, 5, 7, "Сумма к оплате*, руб", bold=True, size=9)
-    merge(4, 8, 9, "Номер операции в ЕРИП", bold=True, size=9)
-    merge(4, 10, 11, "Дата совершения оплаты", bold=True, size=9)
-    merge(4, 12, 12, "Подпись преподавателя об отработке/дата сдачи", bold=True, size=9)
+    merge(4, 0, 0, "№ п/п", bold=True, size=11)
+    merge(4, 1, 2, "ФИО студента полностью", bold=True, size=11)
+    merge(4, 3, 4, "Дата пропуска занятия", bold=True, size=11)
+    merge(4, 5, 7, "Сумма к оплате*, руб", bold=True, size=11)
+    merge(4, 8, 9, "Номер операции в ЕРИП", bold=True, size=11)
+    merge(4, 10, 11, "Дата совершения оплаты", bold=True, size=11)
+    merge(4, 12, 12, "Подпись преподавателя об отработке/дата сдачи", bold=True, size=11)
 
-    merge(5, 0, 0, 1, bold=True, size=9)
-    merge(5, 1, 2, 2, bold=True, size=9)
-    merge(5, 3, 4, 3, bold=True, size=9)
-    merge(5, 5, 7, 4, bold=True, size=9)
-    merge(5, 8, 9, 5, bold=True, size=9)
-    merge(5, 10, 11, 6, bold=True, size=9)
-    merge(5, 12, 12, 7, bold=True, size=9)
+    merge(5, 0, 0, 1, bold=True, size=11)
+    merge(5, 1, 2, 2, bold=True, size=11)
+    merge(5, 3, 4, 3, bold=True, size=11)
+    merge(5, 5, 7, 4, bold=True, size=11)
+    merge(5, 8, 9, 5, bold=True, size=11)
+    merge(5, 10, 11, 6, bold=True, size=11)
+    merge(5, 12, 12, 7, bold=True, size=11)
 
 
 def render_paid(report: PaidReport) -> bytes:
@@ -733,42 +779,34 @@ def render_paid(report: PaidReport) -> bytes:
             space_after=6,
         )
 
-        rows = 6 + max(1, len(group.entries))
+        # Пустые строки — как в бланке: ведомость заполняют и от руки.
+        rows = 6 + max(20, len(group.entries))
         table = _table(document, rows=rows, cols=13, widths=widths)
         _paid_header(table, group, report.month_name, report.group.code)
         for row in table.rows[:6]:
             _keep_row(row)
             row.height = Cm(0.5)
 
-        if not group.entries:
-            cells = table.rows[6].cells
-            _cell(cells[0], "—", size=10)
+        for index in range(rows - 6):
+            entry = group.entries[index] if index < len(group.entries) else None
+            cells = table.rows[6 + index].cells
+            _cell(cells[0], f"{index + 1}." if entry else "", size=10)
             merged = cells[1].merge(cells[2])
-            _cell(merged, "Пропусков нет", size=10, align=WD_ALIGN_PARAGRAPH.LEFT)
+            _cell(
+                merged,
+                entry.member.full_name if entry else "",
+                size=10,
+                align=WD_ALIGN_PARAGRAPH.LEFT,
+            )
             merged = cells[3].merge(cells[4])
-            _cell(merged, "", size=10)
+            _cell(merged, format_date_short(entry.day) if entry else "", size=10)
             merged = cells[5].merge(cells[7])
+            _cell(merged, _money(entry.amount) if entry else "", size=10)
+            merged = cells[8].merge(cells[9])
             _cell(merged, "", size=10)
-            for start, end in ((8, 9), (10, 11)):
-                merged = cells[start].merge(cells[end])
-                _cell(merged, "", size=10)
+            merged = cells[10].merge(cells[11])
+            _cell(merged, "", size=10)
             _cell(cells[12], "", size=10)
-        else:
-            for number, entry in enumerate(group.entries, start=1):
-                row_index = 5 + number
-                cells = table.rows[row_index].cells
-                _cell(cells[0], f"{number}.", size=10)
-                merged = cells[1].merge(cells[2])
-                _cell(merged, entry.member.full_name, size=10, align=WD_ALIGN_PARAGRAPH.LEFT)
-                merged = cells[3].merge(cells[4])
-                _cell(merged, format_date_short(entry.day), size=10)
-                merged = cells[5].merge(cells[7])
-                _cell(merged, _money(entry.amount), size=10)
-                merged = cells[8].merge(cells[9])
-                _cell(merged, "", size=10)
-                merged = cells[10].merge(cells[11])
-                _cell(merged, "", size=10)
-                _cell(cells[12], "", size=10)
 
         _caption(
             document,

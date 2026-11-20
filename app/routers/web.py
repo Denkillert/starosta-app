@@ -969,7 +969,7 @@ async def action_link_student(
     if pending is None or pending.group_id != ctx.group.id:
         return _redirect(_back("/students", ctx), err="Заявка не найдена")
 
-    target_id = _form_group_id({"group": form.get("target_member")})
+    target_id = parse_int(form.get("target_member"), 0) or 0
     target = db.get(Membership, target_id) if target_id else None
     if target is None or target.group_id != ctx.group.id:
         return _redirect(_back("/students", ctx), err="Выберите студента из группы")
