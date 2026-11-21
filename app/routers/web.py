@@ -825,6 +825,71 @@ async def action_attendance_toggle(request: Request, db: DbSession, user: Curren
     )
 
 
+@router.post("/actions/attendance/batch")
+async def action_attendance_batch(request: Request, db: DbSession, user: CurrentUser):
+    """Одна транзакция на все отметки, накопленные в журнале.
+
+    Страница не перезагружается: JS собирает локальные изменения и
+    отправляет их сюда одним JSON-запросом.
+    """
+    try:
+        payload = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse(
+            {"ok": False, "error": "Некорректный запрос"}, status_code=400
+        )
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            {"ok": False, "error": "Некорректный запрос"}, status_code=400
+        )
+
+    ctx = build_context(
+        request,
+        db,
+        user,
+        page="journal",
+        group_id=parse_int(payload.get("group"), 0) or 0,
+    )
+    if ctx.group is None:
+        return JSONResponse(
+            {"ok": False, "error": "Сначала создайте группу"}, status_code=400
+        )
+    if not _ensure_staff(ctx):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "Отмечать посещаемость может староста или заместитель",
+            },
+            status_code=403,
+        )
+
+    changes = payload.get("changes")
+    if not isinstance(changes, list) or not changes:
+        return JSONResponse(
+            {"ok": False, "error": "Нет изменений для сохранения"},
+            status_code=400,
+        )
+    if len(changes) > 500:
+        return JSONResponse(
+            {"ok": False, "error": "Слишком много изменений за один раз"},
+            status_code=400,
+        )
+
+    saved, errors = attendance_service.apply_changes(
+        db, group_id=ctx.group.id, changes=changes, actor=user
+    )
+    if errors:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": errors[0].get("reason", "Не удалось сохранить отметки"),
+                "errors": errors,
+            },
+            status_code=409,
+        )
+    return JSONResponse({"ok": True, "saved": saved})
+
+
 @router.post("/actions/attendance/reset-day")
 async def action_attendance_reset(request: Request, db: DbSession, user: CurrentUser):
     form = await request.form()

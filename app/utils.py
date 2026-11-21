@@ -64,6 +64,11 @@ def format_time(value) -> str:
     return value.strftime("%H:%M") if value else "—"
 
 
+def name_sort_key(value: str | None) -> str:
+    """Ключ регистронезависимой сортировки русских ФИО («Ё» рядом с «Е»)."""
+    return " ".join((value or "").casefold().replace("ё", "е").split())
+
+
 def short_name(full_name: str | None) -> str:
     """«Иванова Анна Сергеевна» → «Иванова А.С.» для журнала и ведомости."""
     if not full_name:

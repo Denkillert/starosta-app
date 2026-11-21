@@ -13,10 +13,9 @@ from ..constants import (
     DocType,
     MemberStatus,
     OccurrenceStatus,
-    Role,
 )
 from ..models import Attendance, Lesson, LessonOccurrence, Membership, Subject, User
-from ..utils import lesson_fits_member, now_local, subgroup_number
+from ..utils import lesson_fits_member, name_sort_key, now_local, subgroup_number
 from . import audit
 from .schedule import list_day, list_range
 from .schedule_sync import latest_snapshot
@@ -140,25 +139,24 @@ class MonthData:
             "students": len(self.students),
         }
 
+def _name_key(member: Membership) -> tuple[str, int]:
+    """Ключ строго алфавитной сортировки, без учёта должности."""
+    return name_sort_key(member.full_name), member.id
+
+
 def roster(db: Session, group_id: int) -> list[Membership]:
-    role_order = case(
-        (Membership.role == Role.HEAD, 0),
-        (Membership.role == Role.DEPUTY, 1),
-        else_=2,
-    )
-    return list(
+    members = list(
         db.scalars(
-            select(Membership)
-            .where(
+            select(Membership).where(
                 Membership.group_id == group_id,
                 Membership.status == MemberStatus.ACTIVE,
                 # Заявки по коду приглашения не считаются студентами, пока
                 # староста не проверит ФИО и подгруппу.
                 Membership.needs_review.is_(False),
             )
-            .order_by(role_order, Membership.full_name)
         ).all()
     )
+    return sorted(members, key=_name_key)
 
 def day_overview(
     db: Session, group_id: int, day: date, terms: int | None = None
@@ -290,6 +288,140 @@ def toggle(
         commit=True,
     )
     return target
+
+def apply_changes(
+    db: Session,
+    *,
+    group_id: int,
+    changes: list[dict],
+    actor: User | None = None,
+) -> tuple[int, list[dict]]:
+    """Сохраняет пачку отметок одной транзакцией.
+
+    Сначала проверяются все строки. Если хоть одна некорректна, не
+    сохраняется ничего — интерфейс не показывает «полуприменённые»
+    отметки и может спокойно повторить запрос.
+    """
+    prepared: list[tuple[LessonOccurrence, Membership, str]] = []
+    errors: list[dict] = []
+    seen: set[tuple[int, int]] = set()
+
+    for raw in changes:
+        if not isinstance(raw, dict):
+            errors.append({"reason": "Некорректная строка отметки"})
+            continue
+        try:
+            occurrence_id = int(raw.get("occurrence_id") or 0)
+            member_id = int(raw.get("member_id") or 0)
+        except (TypeError, ValueError):
+            errors.append({"reason": "Некорректная пара или студент"})
+            continue
+
+        key = (occurrence_id, member_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        status = str(raw.get("status") or "")
+        if status not in (AttendanceStatus.PRESENT, AttendanceStatus.ABSENT):
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Вручную можно ставить только «присутствует» или «пропуск»",
+                }
+            )
+            continue
+
+        occurrence = db.get(LessonOccurrence, occurrence_id)
+        if occurrence is None or occurrence.group_id != group_id:
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Пара не найдена в этой группе",
+                }
+            )
+            continue
+        if occurrence.status == OccurrenceStatus.CANCELLED:
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Пара отменена",
+                }
+            )
+            continue
+
+        member = db.get(Membership, member_id)
+        if (
+            member is None
+            or member.group_id != group_id
+            or member.status != MemberStatus.ACTIVE
+            or member.needs_review
+        ):
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Студент не найден в этой группе",
+                }
+            )
+            continue
+        if not lesson_fits_member(occurrence.lesson.subgroup, member.subgroup):
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Пара относится к другой подгруппе",
+                }
+            )
+            continue
+
+        row = db.scalar(
+            select(Attendance).where(
+                Attendance.occurrence_id == occurrence_id,
+                Attendance.member_id == member_id,
+            )
+        )
+        if row is not None and effective_status(row) == AttendanceStatus.EXCUSED:
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "«У» ставится документом и не меняется вручную",
+                }
+            )
+            continue
+
+        prepared.append((occurrence, member, status))
+
+    if errors:
+        return 0, errors
+
+    for occurrence, member, status in prepared:
+        mark(
+            db,
+            occurrence=occurrence,
+            member=member,
+            status=status,
+            actor=actor,
+            commit=False,
+        )
+
+    if prepared:
+        audit.log(
+            db,
+            action="attendance.batch",
+            group_id=group_id,
+            actor_id=actor.id if actor else None,
+            entity_type="group",
+            entity_id=group_id,
+            payload={"count": len(prepared)},
+        )
+        db.commit()
+    return len(prepared), []
+
 
 def reset_day(
     db: Session, group_id: int, day: date, actor: User | None = None

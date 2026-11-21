@@ -44,8 +44,8 @@
                   {{ view.lesson.start_time|hm }}–{{ view.lesson.end_time|hm }}{% if view.lesson.room %} · ауд. {{ view.lesson.room }}{% endif %}
                 </span>
                 {% if view.lesson.subgroup %}<span class="att-room">{{ view.lesson.subgroup }}</span>{% endif %}
-                <span class="att-count{% if view.marked %} is-partial{% endif %}">
-                  <b>{{ view.present }}</b>/{{ view.total }} присутствуют
+                <span class="att-count{% if view.marked %} is-partial{% endif %}" data-att-count="{{ view.occurrence.id }}">
+                  <b data-att-present>{{ view.present }}</b>/<span data-att-total>{{ view.total }}</span> присутствуют
                 </span>
                 {% if view.occurrence.note %}
                   <span class="att-note">{{ view.occurrence.note }}</span>
@@ -78,19 +78,21 @@
                   <td class="att-cell att-na" title="Пара другой подгруппы">—</td>
                 {% else %}
                   {% set status = view.status_for(member.id) %}
-                  <td class="att-cell att-{{ status }}">
+                  <td class="att-cell att-{{ status }}"
+                      data-att-cell
+                      data-occurrence="{{ view.occurrence.id }}"
+                      data-member="{{ member.id }}"
+                      data-status="{{ status }}"
+                      data-original="{{ status }}"
+                      {% if status == 'excused' %}data-frozen="1"{% endif %}>
                     {% if ctx.is_staff and status != 'excused' %}
-                      <form method="post" action="/actions/attendance/toggle" class="att-form">
-                        <input type="hidden" name="group" value="{{ ctx.group.id }}">
-                        <input type="hidden" name="occurrence_id" value="{{ view.occurrence.id }}">
-                        <input type="hidden" name="member_id" value="{{ member.id }}">
-                        <input type="hidden" name="next" value="{{ url_with('/journal', group=ctx.group.id, date=day|iso, term=ctx.term) }}">
-                        <button type="submit"
-                                class="att-btn att-btn-{{ status }}"
-                                title="{% if status == 'absent' %}Вернуть «присутствует»{% else %}Отметить пропуск{% endif %} · {{ member.full_name }} · {{ view.lesson.subject.name }}">
-                          {{ view.symbol_for(member.id) }}
-                        </button>
-                      </form>
+                      <button type="button"
+                              class="att-btn att-btn-{{ status }}"
+                              data-att-toggle
+                              aria-pressed="{{ 'true' if status == 'absent' else 'false' }}"
+                              title="{% if status == 'absent' %}Вернуть «присутствует»{% else %}Отметить пропуск{% endif %} · {{ member.full_name }} · {{ view.lesson.subject.name }}">
+                        {{ view.symbol_for(member.id) }}
+                      </button>
                     {% else %}
                       <span class="att-btn att-btn-{{ status }}"{% if status == 'excused' %} title="Уважительная причина по документу"{% endif %}>{{ view.symbol_for(member.id) }}</span>
                     {% endif %}
@@ -120,8 +122,19 @@
     {% endif %}
   </section>
 
+  {% if ctx.is_staff %}
+    <div class="att-commit" data-att-commit data-group="{{ ctx.group.id }}" hidden>
+      <span class="att-commit-label" data-att-commit-label>Отметки не сохранены</span>
+      <div class="att-commit-actions">
+        <button class="btn btn-ghost btn-sm" type="button" data-att-discard>Отменить</button>
+        <button class="btn btn-primary btn-sm" type="button" data-att-save>Подтвердить</button>
+      </div>
+    </div>
+  {% endif %}
+
   <p class="muted small center">
     По умолчанию все присутствуют. Нажмите на зелёную галочку, чтобы отметить пропуск.
+    Отметки отправятся на сервер только после кнопки «Подтвердить».
     «У» ставится автоматически, если на эту пару действует распоряжение или справка.
   </p>
 {% endif %}

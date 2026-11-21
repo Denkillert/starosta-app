@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..constants import Funding, MemberStatus, Role
 from ..models import Attendance, Group, Lesson, LessonOccurrence, Membership, User
-from ..utils import lesson_fits_member, subgroup_number
+from ..utils import lesson_fits_member, name_sort_key, subgroup_number
 from . import audit
 
 
@@ -449,12 +449,21 @@ def membership_for_telegram(
 
 
 def group_members(db: Session, group_id: int) -> list[Membership]:
-    return list(
+    members = list(
         db.scalars(
-            select(Membership)
-            .where(Membership.group_id == group_id)
-            .order_by(Membership.status, Membership.full_name)
+            select(Membership).where(Membership.group_id == group_id)
         ).all()
+    )
+    # Сначала действующие, внутри — строго по алфавиту. Должность на порядок
+    # не влияет. SQLite не сортирует кириллицу без учёта регистра, поэтому
+    # ключ считается в Python.
+    return sorted(
+        members,
+        key=lambda member: (
+            member.status != MemberStatus.ACTIVE,
+            name_sort_key(member.full_name),
+            member.id,
+        ),
     )
 
 
