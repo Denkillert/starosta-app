@@ -14,7 +14,15 @@ from ..constants import (
     MemberStatus,
     OccurrenceStatus,
 )
-from ..models import Attendance, Lesson, LessonOccurrence, Membership, Subject, User
+from ..models import (
+    Attendance,
+    GroupSubjectSetting,
+    Lesson,
+    LessonOccurrence,
+    Membership,
+    Subject,
+    User,
+)
 from ..utils import lesson_fits_member, name_sort_key, now_local, subgroup_number
 from . import audit
 from .schedule import list_day, list_range
@@ -158,14 +166,101 @@ def roster(db: Session, group_id: int) -> list[Membership]:
     )
     return sorted(members, key=_name_key)
 
+def excluded_subject_ids(db: Session, group_id: int) -> set[int]:
+    """Предметы группы, пропуски по которым не учитываются."""
+    return set(
+        db.scalars(
+            select(GroupSubjectSetting.subject_id).where(
+                GroupSubjectSetting.group_id == group_id,
+                GroupSubjectSetting.excluded.is_(True),
+            )
+        ).all()
+    )
+
+
+def excluded_subjects(db: Session, group_id: int) -> list[Subject]:
+    """Исключённые предметы в порядке, понятном человеку."""
+    ids = excluded_subject_ids(db, group_id)
+    if not ids:
+        return []
+    subjects = list(db.scalars(select(Subject).where(Subject.id.in_(ids))).all())
+    return sorted(subjects, key=lambda subject: (name_sort_key(subject.name), subject.id))
+
+
+def group_subjects(db: Session, group_id: int) -> list[Subject]:
+    """Все предметы, по которым в группе есть пары (для настроек учёта)."""
+    subjects = list(
+        db.scalars(
+            select(Subject)
+            .join(Lesson, Lesson.subject_id == Subject.id)
+            .where(Lesson.group_id == group_id)
+            .distinct()
+        ).all()
+    )
+    return sorted(subjects, key=lambda subject: (name_sort_key(subject.name), subject.id))
+
+
+def set_subject_excluded(
+    db: Session,
+    *,
+    group_id: int,
+    subject_id: int,
+    excluded: bool,
+    actor: User | None = None,
+) -> bool:
+    """Включить или выключить учёт пропусков по предмету для одной группы."""
+    subject = db.get(Subject, subject_id)
+    if subject is None:
+        raise ValueError("Предмет не найден")
+    has_lessons = db.scalar(
+        select(Lesson.id)
+        .where(Lesson.group_id == group_id, Lesson.subject_id == subject_id)
+        .limit(1)
+    )
+    if has_lessons is None:
+        raise ValueError("В этой группе нет пар по этому предмету")
+
+    row = db.scalar(
+        select(GroupSubjectSetting).where(
+            GroupSubjectSetting.group_id == group_id,
+            GroupSubjectSetting.subject_id == subject_id,
+        )
+    )
+    if excluded:
+        if row is None:
+            row = GroupSubjectSetting(
+                group_id=group_id, subject_id=subject_id, excluded=True
+            )
+            db.add(row)
+        else:
+            row.excluded = True
+    elif row is not None:
+        db.delete(row)
+
+    audit.log(
+        db,
+        action="subject.exclusion",
+        group_id=group_id,
+        actor_id=actor.id if actor else None,
+        entity_type="subject",
+        entity_id=subject_id,
+        payload={"name": subject.name, "excluded": bool(excluded)},
+    )
+    db.commit()
+    return bool(excluded)
+
+
 def day_overview(
     db: Session, group_id: int, day: date, terms: int | None = None
 ) -> list[OccurrenceView]:
     members = roster(db, group_id)
     member_ids = [m.id for m in members]
+    excluded = excluded_subject_ids(db, group_id)
     views: list[OccurrenceView] = []
     for occurrence in list_day(db, group_id, day):
         if occurrence.status == OccurrenceStatus.CANCELLED:
+            continue
+        if occurrence.lesson.subject_id in excluded:
             continue
         if terms is not None and occurrence.lesson.term != terms:
             continue
@@ -219,6 +314,8 @@ def mark(
         raise ValueError("Студент и пара относятся к разным группам")
     if occurrence.status == OccurrenceStatus.CANCELLED:
         raise ValueError("Нельзя отметить отменённую пару")
+    if occurrence.lesson.subject_id in excluded_subject_ids(db, occurrence.group_id):
+        raise ValueError("Предмет исключён из учёта пропусков")
     if not lesson_fits_member(occurrence.lesson.subgroup, member.subgroup):
         raise ValueError(
             "Студент не в той подгруппе: эта пара для "
@@ -305,6 +402,7 @@ def apply_changes(
     prepared: list[tuple[LessonOccurrence, Membership, str]] = []
     errors: list[dict] = []
     seen: set[tuple[int, int]] = set()
+    excluded = excluded_subject_ids(db, group_id)
 
     for raw in changes:
         if not isinstance(raw, dict):
@@ -349,6 +447,15 @@ def apply_changes(
                     "occurrence_id": occurrence_id,
                     "member_id": member_id,
                     "reason": "Пара отменена",
+                }
+            )
+            continue
+        if occurrence.lesson.subject_id in excluded:
+            errors.append(
+                {
+                    "occurrence_id": occurrence_id,
+                    "member_id": member_id,
+                    "reason": "Предмет исключён из учёта пропусков",
                 }
             )
             continue
@@ -462,6 +569,10 @@ def summary(
     if not stats:
         return []
 
+    # Исключённые предметы не попадают ни в знаменатель, ни в счётчики.
+    excluded = excluded_subject_ids(db, group_id)
+    subject_filter = [Lesson.subject_id.notin_(excluded)] if excluded else []
+
     total_occurrences = db.execute(
         select(Lesson.subgroup, func.count(LessonOccurrence.id))
         .select_from(LessonOccurrence)
@@ -471,6 +582,7 @@ def summary(
             LessonOccurrence.date >= date_from,
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
+            *subject_filter,
         )
         .group_by(Lesson.subgroup)
     ).all()
@@ -495,6 +607,7 @@ def summary(
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
             Attendance.member_id.in_(list(stats.keys())),
+            *subject_filter,
         )
         .group_by(Attendance.member_id, Attendance.status, Lesson.subgroup)
     ).all()
@@ -565,6 +678,9 @@ def subject_summary(
             return len(members)
         return members_without_subgroup + members_by_subgroup.get(subgroup, 0)
 
+    excluded = excluded_subject_ids(db, group_id)
+    subject_filter = [Lesson.subject_id.notin_(excluded)] if excluded else []
+
     occurrences = db.execute(
         select(
             Lesson.subject_id,
@@ -580,6 +696,7 @@ def subject_summary(
             LessonOccurrence.date >= date_from,
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
+            *subject_filter,
         )
         .group_by(Lesson.subject_id, Subject.name, Lesson.subgroup)
     ).all()
@@ -607,6 +724,7 @@ def subject_summary(
             LessonOccurrence.date >= date_from,
             LessonOccurrence.date <= date_to,
             LessonOccurrence.status == OccurrenceStatus.SCHEDULED,
+            *subject_filter,
         )
         .group_by(
             Lesson.subject_id,
@@ -703,7 +821,10 @@ def apply_document(db: Session, doc) -> int:
         stmt = stmt.where(LessonOccurrence.lesson_id.in_(doc.lesson_ids))
 
     occurrences = []
+    excluded = excluded_subject_ids(db, doc.group_id)
     for occurrence in db.scalars(stmt).all():
+        if occurrence.lesson.subject_id in excluded:
+            continue
         occ_start = datetime.combine(occurrence.date, occurrence.lesson.start_time)
         occ_end = datetime.combine(occurrence.date, occurrence.lesson.end_time)
         # Ключевая проверка: пересекается ли время пары с временем действия документа
@@ -813,10 +934,12 @@ def month_matrix(
         return data
 
     member_by_id = {member.id: member for member in members}
+    excluded = excluded_subject_ids(db, group_id)
     occurrences = [
         occurrence
         for occurrence in list_range(db, group_id, first, last)
         if occurrence.status == OccurrenceStatus.SCHEDULED
+        and occurrence.lesson.subject_id not in excluded
     ]
 
     if not occurrences:

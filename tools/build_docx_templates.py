@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.shared import Twips
 from docx.table import _Cell
@@ -81,6 +82,48 @@ def allow_name_overflow(cell, twips: int = -560) -> None:
     paragraph.paragraph_format.right_indent = Twips(twips)
 
 
+def equalize_document_columns(table, blocks: int = 3) -> None:
+    """Делает блоки «Справки / Заявления / Распоряжения» одинаковой ширины.
+
+    В образце «Справки» шире остальных. Каждый блок состоит из двух колонок
+    (ФИО + дата), поэтому делим общую ширину таблицы на три равные пары и
+    обновляем и сетку, и ``tcW`` у всех ячеек — иначе Word возьмёт старые
+    ширины из ячеек.
+    """
+    grid = table._tbl.find(qn("w:tblGrid"))
+    assert grid is not None, "у таблицы документов нет сетки колонок"
+    columns = grid.findall(qn("w:gridCol"))
+    total = sum(int(column.get(qn("w:w"))) for column in columns)
+    pair_total = total // blocks
+    remainder = total - pair_total * blocks
+
+    widths: list[int] = []
+    for index in range(blocks):
+        target = pair_total + (1 if index < remainder else 0)
+        first = target - target // 2
+        widths.extend([first, target // 2])
+
+    for column, width in zip(columns, widths, strict=True):
+        column.set(qn("w:w"), str(width))
+
+    for tr in _rows(table):
+        index = 0
+        for tc in tr.findall(qn("w:tc")):
+            tc_pr = tc.find(qn("w:tcPr"))
+            span = 1
+            if tc_pr is not None:
+                grid_span = tc_pr.find(qn("w:gridSpan"))
+                if grid_span is not None:
+                    span = int(grid_span.get(qn("w:val")) or 1)
+            if tc_pr is None:
+                continue
+            tc_w = tc_pr.find(qn("w:tcW"))
+            if tc_w is not None:
+                tc_w.set(qn("w:w"), str(sum(widths[index : index + span])))
+                tc_w.set(qn("w:type"), "dxa")
+            index += span
+
+
 def build_propuski(source: Path) -> Path:
     doc = Document(str(source))
     paragraphs = doc.paragraphs
@@ -120,6 +163,12 @@ def build_propuski(source: Path) -> Path:
     set_row_height(_rows(documents)[2], 266)
     for cell in _cells(_rows(documents)[2], documents):
         clear_cell(cell)
+    # Колонки с датами сразу центрируем в самом бланке: тогда выравнивание
+    # сохраняется при клонировании строки.
+    for cell in _cells(_rows(documents)[2], documents)[1::2]:
+        for paragraph in cell.paragraphs:
+            paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    equalize_document_columns(documents)
 
     paid_work = doc.tables[2]
     assert len(_rows(paid_work)) == 34, len(_rows(paid_work))

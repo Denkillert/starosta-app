@@ -352,12 +352,14 @@ def _fill_documents(table, report: PropuskiReport) -> None:
             if line is None:
                 docx_kit.set_cell(cells[offset], "")
                 docx_kit.set_cell(cells[offset + 1], "")
-                continue
-            docx_kit.set_cell(cells[offset], line.student)
-            if offset == 4:
-                docx_kit.set_cell(cells[offset + 1], _order_cell(line))
             else:
-                docx_kit.set_cell(cells[offset + 1], line.period)
+                docx_kit.set_cell(cells[offset], line.student)
+                if offset == 4:
+                    docx_kit.set_cell(cells[offset + 1], _order_cell(line))
+                else:
+                    docx_kit.set_cell(cells[offset + 1], line.period)
+            # Даты (и «Номер и дата») по центру колонки, как в образце.
+            docx_kit.center_cell(cells[offset + 1])
 
 
 def _fill_paid_work(table, report: PropuskiReport) -> None:

@@ -11,6 +11,7 @@ from io import BytesIO
 from pathlib import Path
 
 from docx import Document as DocxDocument
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.table import _Cell
 from docx.text.paragraph import Paragraph
@@ -99,3 +100,9 @@ def set_cell(cell: _Cell, value: object, *, donor: _Cell | None = None) -> None:
     template_rpr = _rpr(donor)
     if template_rpr is not None:
         run._r.insert(0, copy.deepcopy(template_rpr))
+
+
+def center_cell(cell: _Cell) -> None:
+    """Выравнивает все абзацы ячейки по центру (даты в колонках)."""
+    for paragraph in cell.paragraphs:
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER

@@ -17,6 +17,17 @@
   </div>
 </section>
 
+{% if excluded_subjects %}
+  <div class="note card small">
+    Не учитываются в посещаемости:
+    {% for subject in excluded_subjects %}{{ subject.name }}{% if not loop.last %}, {% endif %}{% endfor %}.
+    Пары по ним остаются в расписании, но в журнале не отмечаются.
+    {% if ctx.is_staff %}
+      <a href="{{ url_with('/students', group=ctx.group.id) }}#subjects">Настроить</a>
+    {% endif %}
+  </div>
+{% endif %}
+
 {% if not ctx.is_staff %}
   <div class="note card small">
     Журнал доступен для просмотра. Отмечает посещаемость староста или заместитель.

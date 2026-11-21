@@ -148,6 +148,29 @@ class Subject(Base, TimestampMixin):
     lessons: Mapped[list[Lesson]] = relationship(back_populates="subject")
 
 
+class GroupSubjectSetting(Base, TimestampMixin):
+    """Настройка предмета внутри группы.
+
+    ``excluded=True`` — пары предмета остаются в расписании, но пропуски по
+    ним не попадают в журнал, статистику и ведомости. У каждой группы свои
+    настройки: «Информационный час» можно отключить только там, где он есть.
+    """
+
+    __tablename__ = "group_subject_settings"
+    __table_args__ = (
+        UniqueConstraint("group_id", "subject_id", name="uq_group_subject_setting"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    group_id: Mapped[int] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), nullable=False
+    )
+    subject_id: Mapped[int] = mapped_column(
+        ForeignKey("subjects.id", ondelete="CASCADE"), nullable=False
+    )
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+
 class Lesson(Base, TimestampMixin):
     """Шаблон пары: «каждый вторник 10:05–11:25, недели 2, 4, 6…»."""
 

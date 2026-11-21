@@ -306,6 +306,7 @@ def journal_page(request: Request, db: DbSession, user: CurrentUser):
         prev_day=day - timedelta(days=1),
         next_day=day + timedelta(days=1),
         today=today,
+        excluded_subjects=attendance_service.excluded_subjects(db, ctx.group.id),
     )
 
 
@@ -339,6 +340,8 @@ def students_page(request: Request, db: DbSession, user: CurrentUser):
         pending_members=pending_members,
         link_candidates=link_candidates,
         db_token=sign_file_token(user_id=user.id, group_id=ctx.group.id),
+        subjects=attendance_service.group_subjects(db, ctx.group.id),
+        excluded_subject_ids=attendance_service.excluded_subject_ids(db, ctx.group.id),
     )
 
 
@@ -479,6 +482,7 @@ def stats_page(request: Request, db: DbSession, user: CurrentUser):
         date_from=date_from,
         date_to=date_to,
         today=today,
+        excluded_subjects=attendance_service.excluded_subjects(db, ctx.group.id),
     )
 
 
@@ -1048,6 +1052,43 @@ async def action_link_student(
     return _redirect(
         _back("/students", ctx),
         msg=f"Telegram привязан к «{target.full_name}»",
+    )
+
+
+@router.post("/actions/subjects/{subject_id}/exclusion")
+async def action_subject_exclusion(
+    subject_id: int, request: Request, db: DbSession, user: CurrentUser
+):
+    """Староста включает/выключает учёт пропусков по предмету для группы."""
+    form = await request.form()
+    ctx = build_context(
+        request, db, user, page="students", group_id=_form_group_id(form)
+    )
+    if ctx.group is None:
+        return _redirect("/", err="Сначала создайте группу")
+    if not _ensure_staff(ctx):
+        return _redirect(
+            _back("/students", ctx),
+            err="Настраивать учёт пропусков может староста или заместитель",
+        )
+
+    excluded = str(form.get("excluded") or "0") == "1"
+    try:
+        attendance_service.set_subject_excluded(
+            db,
+            group_id=ctx.group.id,
+            subject_id=subject_id,
+            excluded=excluded,
+            actor=user,
+        )
+    except ValueError as exc:
+        return _redirect(_back("/students", ctx), err=str(exc))
+
+    return _redirect(
+        _back("/students", ctx) + "#subjects",
+        msg="Предмет исключён из учёта пропусков"
+        if excluded
+        else "Пропуски по предмету снова учитываются",
     )
 
 

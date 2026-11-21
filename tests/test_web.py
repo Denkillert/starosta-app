@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from sqlalchemy import select
+
 from app.config import settings
+from app.models import Subject
 from app.security import sign_file_token
+from app.services import attendance as attendance_service
 
 
 def test_dashboard_renders(api_client):
@@ -234,3 +238,52 @@ def test_attendance_action_targets_group_from_form(api_client, seeded, session_f
     )
     entry = next(e for e in target["entries"] if e["member_id"] == student_id)
     assert entry["status"] == "absent"
+
+
+def test_staff_can_exclude_subject_from_absence(api_client, seeded, session_factory):
+    from app.models import User
+    from app.services import groups as groups_service
+
+    with session_factory() as db:
+        subject = db.scalar(
+            select(Subject).where(Subject.name == "Информационный час")
+        )
+        assert subject is not None
+        subject_id = subject.id
+        user = db.get(User, seeded["user_id"])
+        other, _ = groups_service.create_group(
+            db, user=user, code="24ИТ-8", name="24ИТ-8 (тест)"
+        )
+        other_id = other.id
+
+    response = api_client.post(
+        f"/actions/subjects/{subject_id}/exclusion",
+        data={"group": seeded["group_id"], "excluded": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "msg" in response.headers["location"]
+
+    with session_factory() as db:
+        assert subject_id in attendance_service.excluded_subject_ids(
+            db, seeded["group_id"]
+        )
+        # У каждой группы своя настройка: соседняя группа не затронута.
+        assert attendance_service.excluded_subject_ids(db, other_id) == set()
+
+    page = api_client.get("/students")
+    assert page.status_code == 200
+    assert "Информационный час" in page.text
+    assert "не учитывается" in page.text
+
+    response = api_client.post(
+        f"/actions/subjects/{subject_id}/exclusion",
+        data={"group": seeded["group_id"], "excluded": "0"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    with session_factory() as db:
+        assert subject_id not in attendance_service.excluded_subject_ids(
+            db, seeded["group_id"]
+        )
+

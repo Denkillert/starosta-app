@@ -113,6 +113,13 @@
   </div>
 </section>
 
+{% if excluded_subjects %}
+  <p class="muted small center">
+    Не учитываются в посещаемости:
+    {% for subject in excluded_subjects %}{{ subject.name }}{% if not loop.last %}, {% endif %}{% endfor %}.
+  </p>
+{% endif %}
+
 <p class="muted small center">
   Процент = был / (был + пропуск). «Уважительная» не входит в знаменатель.
   Отсутствие отметки означает присутствие.

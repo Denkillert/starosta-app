@@ -145,3 +145,96 @@ def test_subject_summary_returns_subjects(db, seeded):
     assert subjects
     assert subjects[0]["name"]
     assert subjects[0]["percent"] is not None
+
+
+def test_excluded_subject_is_not_counted(db, seeded):
+    occurrences = [
+        occurrence
+        for occurrence in _occurrences(db, seeded["group_id"])
+        if occurrence.status == OccurrenceStatus.SCHEDULED
+    ]
+    info = next(
+        occurrence
+        for occurrence in occurrences
+        if occurrence.lesson.subject.name == "Информационный час"
+    )
+    day = info.date
+    same_day = [occurrence for occurrence in occurrences if occurrence.date == day]
+    info_count = sum(
+        1
+        for occurrence in same_day
+        if occurrence.lesson.subject_id == info.lesson.subject_id
+    )
+    member = db.get(Membership, seeded["members"][0])
+    user = db.get(User, seeded["user_id"])
+    group_id = seeded["group_id"]
+
+    attendance_service.mark(
+        db,
+        occurrence=info,
+        member=member,
+        status=AttendanceStatus.ABSENT,
+        actor=user,
+    )
+    before = next(
+        item
+        for item in attendance_service.summary(db, group_id, day, day)
+        if item.member.id == member.id
+    )
+    assert before.absent == 1
+    assert before.total == len(same_day)
+
+    attendance_service.set_subject_excluded(
+        db,
+        group_id=group_id,
+        subject_id=info.lesson.subject_id,
+        excluded=True,
+        actor=user,
+    )
+
+    after = next(
+        item
+        for item in attendance_service.summary(db, group_id, day, day)
+        if item.member.id == member.id
+    )
+    assert after.absent == 0
+    assert after.total == before.total - info_count
+
+    # Пара остаётся в расписании, но в журнале её нет и отметить её нельзя.
+    views = attendance_service.day_overview(db, group_id, day)
+    assert all(view.lesson.subject_id != info.lesson.subject_id for view in views)
+    with pytest.raises(ValueError):
+        attendance_service.mark(
+            db,
+            occurrence=info,
+            member=member,
+            status=AttendanceStatus.ABSENT,
+            actor=user,
+        )
+
+    names = [
+        item["name"]
+        for item in attendance_service.subject_summary(db, group_id, day, day)
+    ]
+    assert "Информационный час" not in names
+
+    matrix = attendance_service.month_matrix(db, group_id, day.year, day.month)
+    assert all(
+        entry.subject != "Информационный час" for entry in matrix.paid_entries
+    )
+
+    # Повторное включение возвращает прежние счётчики: отметки не удалялись.
+    attendance_service.set_subject_excluded(
+        db,
+        group_id=group_id,
+        subject_id=info.lesson.subject_id,
+        excluded=False,
+        actor=user,
+    )
+    again = next(
+        item
+        for item in attendance_service.summary(db, group_id, day, day)
+        if item.member.id == member.id
+    )
+    assert again.absent == before.absent
+    assert again.total == before.total

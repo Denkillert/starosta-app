@@ -23,6 +23,7 @@ from ..models import (
     AuditLog,
     Document,
     Group,
+    GroupSubjectSetting,
     Lesson,
     LessonOccurrence,
     Membership,
@@ -55,6 +56,11 @@ def _copy_group(db: Session, conn: Connection, group: Group) -> None:
 
     groups = _select_rows(db, Group.__table__, Group.id == group_id)
     memberships = _select_rows(db, Membership.__table__, Membership.group_id == group_id)
+    subject_settings = _select_rows(
+        db,
+        GroupSubjectSetting.__table__,
+        GroupSubjectSetting.group_id == group_id,
+    )
     lessons = _select_rows(db, Lesson.__table__, Lesson.group_id == group_id)
     occurrences = _select_rows(
         db, LessonOccurrence.__table__, LessonOccurrence.group_id == group_id
@@ -102,6 +108,7 @@ def _copy_group(db: Session, conn: Connection, group: Group) -> None:
         (User.__table__, users),
         (Subject.__table__, subjects),
         (Group.__table__, groups),
+        (GroupSubjectSetting.__table__, subject_settings),
         (Membership.__table__, memberships),
         (Lesson.__table__, lessons),
         (LessonOccurrence.__table__, occurrences),

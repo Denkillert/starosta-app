@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from docx import Document as DocxDocument
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from sqlalchemy import select
 
@@ -14,6 +15,7 @@ from app.models import Attendance, Group, LessonOccurrence, Membership, User
 from app.services import attendance as attendance_service
 from app.services import documents as documents_service
 from app.services import vedomosti
+from app.utils import course_for_code
 
 
 def _first_occurrence(db, group_id: int) -> LessonOccurrence:
@@ -159,6 +161,17 @@ def _spans(table, row_index: int) -> list[int]:
     return spans
 
 
+def test_course_is_computed_from_group_code_and_academic_year():
+    # «24ИТ-2»: поступили в 2024 году, учебный год начинается в сентябре.
+    assert course_for_code("24ИТ-2", date(2026, 11, 21)) == 3
+    assert course_for_code("24ИТ-2", date(2026, 9, 1)) == 3
+    assert course_for_code("24ИТ-2", date(2026, 8, 31)) == 2
+    assert course_for_code("24ИТ-2", date(2027, 6, 30)) == 3
+    assert course_for_code("25ИТ-1", date(2026, 9, 1)) == 2
+    assert course_for_code("23ИТ-3", date(2026, 11, 21)) == 4
+    assert course_for_code("", date(2026, 11, 21)) is None
+
+
 def test_docx_reports_match_university_layout():
     group = SimpleNamespace(id=1, code="24ИТ-2")
     member = SimpleNamespace(full_name="Гриценяк Кирилл Вадимович", funding="budget")
@@ -195,7 +208,26 @@ def test_docx_reports_match_university_layout():
     assert _spans(documents, 1) == [1, 1, 1, 1, 1, 1]
     assert len(_grid(documents)) == 6
     assert len(_grid(paid)) == 3
+    # «Справки», «Заявления» и «Распоряжения» занимают одинаковую ширину.
+    documents_grid = _grid(documents)
+    block_widths = [
+        sum(documents_grid[0:2]),
+        sum(documents_grid[2:4]),
+        sum(documents_grid[4:6]),
+    ]
+    assert max(block_widths) - min(block_widths) <= 1
     assert documents.rows[2].cells[0].text == "Потапейко А.Д."
+    assert documents.rows[2].cells[1].text == "14.10.2025"
+    assert documents.rows[2].cells[2].text == "Демидовец А.А."
+    assert documents.rows[2].cells[3].text == "16.10.2025"
+    assert documents.rows[2].cells[4].text == "Седляр Я.Ф."
+    assert documents.rows[2].cells[5].text == "№185 02.10.2025"
+    # Даты выровнены по центру, а не прижаты влево.
+    for column in (1, 3, 5):
+        assert (
+            documents.rows[2].cells[column].paragraphs[0].alignment
+            == WD_ALIGN_PARAGRAPH.CENTER
+        )
 
     paid_report = vedomosti.PaidReport(
         group=group,

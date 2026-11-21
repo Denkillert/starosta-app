@@ -135,6 +135,39 @@
   </section>
 {% endif %}
 
+{% if ctx.is_staff and subjects %}
+  <section class="card" id="subjects">
+    <div class="card-head">
+      <h2 class="card-title">Учёт пропусков по предметам</h2>
+      <span class="muted small">{{ subjects|length }}</span>
+    </div>
+    <p class="muted small">
+      Предмет можно исключить из расчёта посещаемости — например,
+      «Информационный час». Пары останутся в расписании, но пропуски по ним
+      не попадут в журнал, статистику и ведомости. На другие группы настройка
+      не влияет.
+    </p>
+    <div class="subject-settings">
+      {% for subject in subjects %}
+        {% set is_excluded = subject.id in excluded_subject_ids %}
+        <div class="subject-setting {{ 'is-excluded' if is_excluded }}">
+          <span class="subject-setting-name">{{ subject.name }}</span>
+          {% if is_excluded %}
+            <span class="badge muted">не учитывается</span>
+          {% endif %}
+          <form method="post" action="/actions/subjects/{{ subject.id }}/exclusion">
+            <input type="hidden" name="group" value="{{ ctx.group.id }}">
+            <input type="hidden" name="excluded" value="{{ '0' if is_excluded else '1' }}">
+            <button class="btn btn-ghost btn-sm" type="submit">
+              {{ 'Учитывать' if is_excluded else 'Не учитывать' }}
+            </button>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+{% endif %}
+
 {% set confirmed_members = members|rejectattr('needs_review')|list %}
 <section class="card">
   <div class="card-head">
